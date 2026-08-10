@@ -5,6 +5,8 @@ import os
 
 import requests
 
+from .. import config
+
 # ============= 基础请求 =============
 def _ov_base():
     """延迟读取 OpenViking URL，避免模块级别求值导致 .env 未加载的问题"""
@@ -54,17 +56,29 @@ def _ov_post(path, payload, timeout=15):
 
 
 # ============= 记忆 =============
-def openviking_search(query: str) -> str:
-    """在 OpenViking 记忆中语义搜索"""
+def openviking_search(query: str, score_threshold: float = None, limit: int = None) -> str:
+    """在 OpenViking 记忆中语义搜索。
+
+    阈值/条数由 LLM 调用时自行判断传入：
+    - score_threshold: 0~1，默认 0.35（阈值越高要求越相关）
+    - limit: 0~10，默认 3（返回条数）
+    超出允许范围会自动收敛。
+    """
+    threshold = float(score_threshold) if score_threshold is not None else config.OV_SCORE_THRESHOLD
+    threshold = max(0.0, min(1.0, threshold))
+    n = int(limit) if limit is not None else config.OV_SEARCH_LIMIT
+    n = max(0, min(10, n))
     try:
         result = _ov_post("/api/v1/search/search", {
-            "query": query, "score_threshold": 0.30, "limit": 5
+            "query": query,
+            "score_threshold": threshold,
+            "limit": n,
         })
         if "error" in result:
             return json.dumps(result, ensure_ascii=False)
         # 响应在 result.memories 中
         mems = result.get("result", {}).get("memories", [])
-        hits = mems[:8]
+        hits = mems[:n]
         if not hits:
             return json.dumps({"success": True, "results": [], "message": "未找到相关记忆"}, ensure_ascii=False)
         out = {"success": True, "results": []}
@@ -168,10 +182,12 @@ def openviking_load_context(query: str) -> str:
     """在对话前自动搜索相关记忆，返回可注入 prompt 的上下文字符串"""
     try:
         result = _ov_post("/api/v1/search/search", {
-            "query": query, "score_threshold": 0.30, "limit": 5
+            "query": query,
+            "score_threshold": config.OV_SCORE_THRESHOLD,
+            "limit": config.OV_INJECT_LIMIT,
         })
         mems = result.get("result", {}).get("memories", [])
-        hits = mems[:5]
+        hits = mems[:config.OV_INJECT_LIMIT]
         if not hits:
             return ""
         ctx_parts = ["## 📖 相关记忆"]

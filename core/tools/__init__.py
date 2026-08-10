@@ -93,13 +93,25 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "openviking_search",
-            "description": "在 OpenViking 外置记忆中语义搜索，查找之前保存的知识、偏好、项目信息等。当用户的问题涉及已知信息时先查记忆。",
+            "description": "在 OpenViking 外置记忆中语义搜索，查找之前保存的知识、偏好、项目信息等。当用户的问题涉及已知信息时先查记忆。可由你自行判断相似度阈值与返回条数。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
                         "description": "搜索关键词，描述要查找什么内容"
+                    },
+                    "score_threshold": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "相似度阈值（0~1），默认 0.35。阈值越高要求记忆与问题越相关"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10,
+                        "description": "返回条数上限（0~10），默认 3"
                     }
                 },
                 "required": ["query"]
@@ -182,7 +194,7 @@ TOOL_FUNCTIONS = {
     "get_system_info": lambda args: json.dumps(get_system_info(), ensure_ascii=False, indent=2),
     "execute_system_command": lambda args: execute_system_command(args.get('command', '')),
     "baidu_search": lambda args: baidu_search(args.get('mode', 'raw'), args.get('query', '')),
-    "openviking_search": lambda args: openviking_search(args.get('query', '')),
+    "openviking_search": lambda args: openviking_search(args.get('query', ''), args.get('score_threshold'), args.get('limit')),
     "openviking_read": lambda args: openviking_read(args.get('uri', '')),
     "openviking_remember": lambda args: openviking_remember(args.get('category', 'entities'), args.get('name', 'untitled'), args.get('content', '')),
     "other_ov_tool": lambda args: other_ov_tool(args.get('all', False), args.get('tool', ''), args.get('arguments')),

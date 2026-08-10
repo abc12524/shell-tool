@@ -19,6 +19,13 @@ DEEPSEEK_MODEL = os.environ.get('DEEPSEEK_MODEL', 'deepseek-v4-flash')
 # 按 think.txt 官方推荐流程：工具只在对话开始时批量调用一次，之后直接给出最终回答
 MAX_TOOL_ROUNDS = int(os.environ.get('MAX_TOOL_ROUNDS', '6'))
 
+# ===== OpenViking 记忆检索 =====
+# 自动注入的相似度阈值与条数；openviking_search 工具默认值由此提供，
+# 但工具运行时由 LLM 自行传参判断（阈值收敛 0~1，条数收敛 0~10）
+OV_SCORE_THRESHOLD = float(os.environ.get('OV_SCORE_THRESHOLD', '0.35'))
+OV_SEARCH_LIMIT = int(os.environ.get('OV_SEARCH_LIMIT', '3'))
+OV_INJECT_LIMIT = int(os.environ.get('OV_INJECT_LIMIT', '5'))
+
 # ===== MySQL 存储 =====
 DB_CONFIG = {
     'host': os.environ.get('MYSQL_HOST', ''),
