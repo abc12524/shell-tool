@@ -140,14 +140,23 @@ def openviking_read(uri: str) -> str:
 
 
 def openviking_multi_read(uris: list) -> str:
-    """批量读取多个 OpenViking 文件"""
-    try:
-        result = _ov_post("/api/v1/multi_read", {"uris": uris}, timeout=30)
-        if "error" in result:
-            return json.dumps(result, ensure_ascii=False)
-        return json.dumps(result, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return json.dumps({"error": f"批量读取失败 - {str(e)}"}, ensure_ascii=False)
+    """批量读取多个 OpenViking 文件
+
+    服务端无 /api/v1/multi_read 接口，改为逐个调用单文件接口聚合返回。
+    """
+    if not uris:
+        return json.dumps({"error": "uris 列表为空"}, ensure_ascii=False)
+    results = []
+    for uri in uris:
+        try:
+            r = _ov_get("/api/v1/content/read", params={"uri": uri})
+            if "error" in r:
+                results.append({"uri": uri, "success": False, "error": r["error"]})
+            else:
+                results.append({"uri": uri, "success": True, "content": r.get("content", "")})
+        except Exception as e:
+            results.append({"uri": uri, "success": False, "error": f"读取失败 - {str(e)}"})
+    return json.dumps({"success": True, "count": len(results), "results": results}, ensure_ascii=False, indent=2)
 
 
 def openviking_list_dir(uri: str, recursive: bool = False) -> str:
