@@ -14,12 +14,13 @@ def clean_messages_for_api(messages):
 def stream_api_call(client, messages):
     """调用 API 流式接口，返回 (content, reasoning, tool_calls, usage)"""
     cleaned = clean_messages_for_api(messages)
-    import hashlib, json
-    _dbg = []
-    for _m in cleaned:
-        _blob = json.dumps(_m, ensure_ascii=False, sort_keys=True)
-        _dbg.append(f"{_m['role']}:{hashlib.md5(_blob.encode()).hexdigest()[:6]}")
-    print("DBGSEQ> " + " | ".join(_dbg))
+    if config.DEBUG_SEND_SEQ:
+        import hashlib, json
+        _dbg = []
+        for _m in cleaned:
+            _blob = json.dumps(_m, ensure_ascii=False, sort_keys=True)
+            _dbg.append(f"{_m['role']}:{hashlib.md5(_blob.encode()).hexdigest()[:6]}")
+        print("DBGSEQ> " + " | ".join(_dbg))
     stream = client.chat.completions.create(
         model=config.DEEPSEEK_MODEL,
         messages=cleaned,
