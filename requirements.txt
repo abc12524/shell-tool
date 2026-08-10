@@ -1,0 +1,5 @@
+openai>=1.0
+requests
+pymysql
+flask
+python-dotenv
