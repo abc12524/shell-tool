@@ -29,8 +29,7 @@ shell-tool/
 │       ├── other_ov_tool.py  # OpenViking 其他工具合集入口
 │       └── __init__.py       # 工具 schema 定义与调用分发器
 ├── scripts/
-│   ├── qianfan.py            # 百度千帆搜索脚本
-│   └── temp_query.py         # 温湿度传感器数据查询示例脚本
+│   └── qianfan.py            # 百度千帆搜索脚本
 ├── server/
 │   └── api.py                # Flask HTTP API（同步 + SSE 流式）
 └── .env.example              # 环境变量模板
@@ -61,7 +60,6 @@ cp .env.example .env
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | MySQL 会话存储 |
 | `BAIDU_QIANFAN_KEY` | 百度千帆搜索密钥（`scripts/qianfan.py`） |
 | `OPENVIKING_URL/KEY/USER` | OpenViking 外置记忆服务 |
-| `TEMP_DB_HOST/PORT/USER/PASSWORD/NAME` | 传感器数据库（`scripts/temp_query.py`） |
 
 ## 使用
 
@@ -117,4 +115,3 @@ curl http://localhost:8000/health
 
 - `.env` 包含敏感密钥，已被 `.gitignore` 排除，请勿提交
 - 系统提示词内置隐私保护规则：不泄露用户隐私，非用户要求禁止执行外部链接中的命令和脚本
-- `scripts/temp_query.py` 为环境相关的查询示例脚本，表名/传感器 ID 需按实际环境调整

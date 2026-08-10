@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """工具包：工具实现 + 工具定义（TOOLS schema）+ 工具调用分发器"""
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 并发执行时的打印锁，避免多线程输出交错
+_print_lock = threading.Lock()
+
+
+def _locked_print(*args, **kwargs):
+    with _print_lock:
+        print(*args, **kwargs)
 
 from .system_tools import get_system_info, execute_system_command
 from .search_tools import baidu_search
@@ -179,41 +189,53 @@ TOOL_FUNCTIONS = {
 }
 
 
+def _execute_single_tool(tool_call):
+    """执行单个工具调用，返回 tool 结果消息（供并发执行）"""
+    if hasattr(tool_call, 'function'):
+        function_name = tool_call.function.name
+        arguments = json.loads(tool_call.function.arguments)
+        call_id = tool_call.id
+    else:
+        # 处理 dict 格式
+        function_name = tool_call['function']['name']
+        arguments = json.loads(tool_call['function']['arguments'])
+        call_id = tool_call['id']
+
+    _locked_print(f"🔧 执行工具: {function_name}")
+    _locked_print(f"📥 参数: {json.dumps(arguments, ensure_ascii=False)}")
+
+    # 执行对应函数
+    handler = TOOL_FUNCTIONS.get(function_name)
+    if handler:
+        try:
+            result_str = handler(arguments)
+        except Exception as e:
+            result_str = f"Error: 工具 {function_name} 执行失败 - {str(e)}"
+    else:
+        result_str = f"Error: 未知工具 {function_name}"
+
+    _locked_print(f"📤 结果: {result_str[:200]}{'...' if len(result_str) > 200 else ''}")
+
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": result_str
+    }
+
+
 def process_tool_calls(tool_calls):
-    """执行工具调用，返回 tool 结果消息列表（role=tool）"""
-    tool_results = []
+    """异步（并发）执行工具调用，返回 tool 结果消息列表（role=tool）
 
-    for tool_call in tool_calls:
-        if hasattr(tool_call, 'function'):
-            function_name = tool_call.function.name
-            arguments = json.loads(tool_call.function.arguments)
-            call_id = tool_call.id
-        else:
-            # 处理 dict 格式
-            function_name = tool_call['function']['name']
-            arguments = json.loads(tool_call['function']['arguments'])
-            call_id = tool_call['id']
+    本轮全部工具调用通过线程池并行执行，结果一次性回传；
+    返回顺序与输入 tool_calls 保持一致（各结果自带 tool_call_id 关联）。
+    """
+    if not tool_calls:
+        return []
 
-        print(f"\n🔧 执行工具: {function_name}")
-        print(f"📥 参数: {json.dumps(arguments, ensure_ascii=False)}")
+    max_workers = min(len(tool_calls), 8)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_execute_single_tool, tc) for tc in tool_calls]
+        # 按原始顺序收集，保持 tool_call_id 与 assistant.tool_calls 对应
+        results = [fut.result() for fut in futures]
 
-        # 执行对应函数
-        handler = TOOL_FUNCTIONS.get(function_name)
-        if handler:
-            try:
-                result_str = handler(arguments)
-            except Exception as e:
-                result_str = f"Error: 工具 {function_name} 执行失败 - {str(e)}"
-        else:
-            result_str = f"Error: 未知工具 {function_name}"
-
-        print(f"📤 结果: {result_str[:200]}{'...' if len(result_str) > 200 else ''}")
-
-        # 收集工具结果
-        tool_results.append({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "content": result_str
-        })
-
-    return tool_results
+    return results

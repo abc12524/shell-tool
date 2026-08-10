@@ -126,7 +126,7 @@ def chat_completion_with_tools(client, messages, session_id=None):
         print("\n" + "=" * 30)
         print(f"🔧 执行工具 (第{tool_rounds}轮): {len(tool_calls)} 个调用")
 
-        # 一次执行本轮全部工具调用（并行 → 串行执行，结果一次性回传）
+        # 一次并发执行本轮全部工具调用，结果一次性回传
         tool_results = process_tool_calls(tool_calls)
         all_tool_results.extend(tool_results)
 
