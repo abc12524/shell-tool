@@ -7,21 +7,19 @@ from .tools import TOOLS, process_tool_calls
 
 
 def clean_messages_for_api(messages):
-    """剔除 assistant 消息里的 reasoning_content（API 不接受该字段）"""
-    cleaned = []
-    for msg in messages:
-        if msg.get('role') != 'assistant':
-            cleaned.append(msg)
-            continue
-        msg_copy = msg.copy()
-        msg_copy.pop('reasoning_content', None)
-        cleaned.append(msg_copy)
-    return cleaned
+    """保留 assistant 消息的 reasoning_content（thinking 模式模型要求原样回传）"""
+    return messages
 
 
 def stream_api_call(client, messages):
     """调用 API 流式接口，返回 (content, reasoning, tool_calls, usage)"""
     cleaned = clean_messages_for_api(messages)
+    import hashlib, json
+    _dbg = []
+    for _m in cleaned:
+        _blob = json.dumps(_m, ensure_ascii=False, sort_keys=True)
+        _dbg.append(f"{_m['role']}:{hashlib.md5(_blob.encode()).hexdigest()[:6]}")
+    print("DBGSEQ> " + " | ".join(_dbg))
     stream = client.chat.completions.create(
         model=config.DEEPSEEK_MODEL,
         messages=cleaned,

@@ -32,6 +32,7 @@ def init_schema():
         content        MEDIUMTEXT NULL,
         tool_calls_json TEXT NULL,
         tool_call_id   VARCHAR(64) NULL,
+        reasoning_content MEDIUMTEXT NULL,
         created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         KEY idx_session_id (session_id, id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -40,6 +41,10 @@ def init_schema():
         with conn.cursor() as cur:
             cur.execute(sql_sessions)
             cur.execute(sql_messages)
+            # 兼容旧表：缺列则补
+            cur.execute("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_messages' AND COLUMN_NAME='reasoning_content'")
+            if cur.fetchone()['COUNT(*)'] == 0:
+                cur.execute("ALTER TABLE chat_messages ADD COLUMN reasoning_content MEDIUMTEXT NULL AFTER tool_call_id")
         conn.commit()
 
 
@@ -112,13 +117,14 @@ def append_messages(session_id, messages):
             for m in messages:
                 tool_calls = m.get('tool_calls')
                 cur.execute(
-                    "INSERT INTO chat_messages (session_id, role, content, tool_calls_json, tool_call_id) "
-                    "VALUES (%s,%s,%s,%s,%s)",
+                    "INSERT INTO chat_messages (session_id, role, content, tool_calls_json, tool_call_id, reasoning_content) "
+                    "VALUES (%s,%s,%s,%s,%s,%s)",
                     (session_id,
                      m.get('role'),
                      m.get('content'),
                      json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
-                     m.get('tool_call_id')))
+                     m.get('tool_call_id'),
+                     m.get('reasoning_content')))
             # 触碰会话更新时间，保证"默认同一对话"能找到最近会话
             cur.execute("UPDATE chat_sessions SET updated_at=NOW() WHERE id=%s", (session_id,))
         conn.commit()
@@ -126,7 +132,7 @@ def append_messages(session_id, messages):
 
 def load_messages(session_id):
 
-    sql = ("SELECT role, content, tool_calls_json, tool_call_id FROM chat_messages "
+    sql = ("SELECT role, content, tool_calls_json, tool_call_id, reasoning_content FROM chat_messages "
            "WHERE session_id=%s ORDER BY id")
     with _conn() as conn:
         with conn.cursor() as cur:
@@ -137,15 +143,20 @@ def load_messages(session_id):
     for row in rows:
         role = row['role']
         if role == 'assistant' and row['tool_calls_json']:
-            msgs.append({
+            m = {
                 'role': 'assistant',
                 'content': row['content'] or '',
                 'tool_calls': json.loads(row['tool_calls_json']),
-            })
+            }
+            if row['reasoning_content']:
+                m['reasoning_content'] = row['reasoning_content']
+            msgs.append(m)
         else:
             m = {'role': role, 'content': row['content'] or ''}
             if role == 'tool' and row['tool_call_id']:
                 m['tool_call_id'] = row['tool_call_id']
+            if role == 'assistant' and row['reasoning_content']:
+                m['reasoning_content'] = row['reasoning_content']
             msgs.append(m)
 
     # 保证消息序列合法：开头不能是孤立的 tool 结果或未配对的 tool_calls
