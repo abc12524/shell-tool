@@ -137,10 +137,11 @@ def openviking_read(uri: str) -> str:
         return _aggregate_read(uri)
     try:
         result = _ov_get("/api/v1/content/read", params={"uri": uri})
-        if "error" in result:
-            return json.dumps(result, ensure_ascii=False)
-        if "content" in result:
-            return result["content"]
+        # 成功响应: {"status":"ok","result":"<内容字符串>","error":null,...}
+        if result.get("error"):
+            return json.dumps({"error": result["error"]}, ensure_ascii=False)
+        if "result" in result:
+            return result["result"] if isinstance(result["result"], str) else json.dumps(result["result"], ensure_ascii=False, indent=2)
         return json.dumps(result, ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": f"读取失败 - {str(e)}"}, ensure_ascii=False)
@@ -154,10 +155,13 @@ def _aggregate_read(uris: list) -> str:
     for uri in uris:
         try:
             r = _ov_get("/api/v1/content/read", params={"uri": uri})
-            if "error" in r:
+            # 成功响应: {"status":"ok","result":"<内容字符串>","error":null,...}
+            if r.get("error"):
                 results.append({"uri": uri, "success": False, "error": r["error"]})
+            elif r.get("status") == "ok" or "result" in r:
+                results.append({"uri": uri, "success": True, "content": r.get("result", "")})
             else:
-                results.append({"uri": uri, "success": True, "content": r.get("content", "")})
+                results.append({"uri": uri, "success": False, "error": "未知响应结构"})
         except Exception as e:
             results.append({"uri": uri, "success": False, "error": f"读取失败 - {str(e)}"})
     return json.dumps({"success": True, "count": len(results), "results": results}, ensure_ascii=False, indent=2)
