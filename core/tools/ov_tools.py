@@ -127,7 +127,14 @@ def openviking_remember(category: str, name: str, content: str) -> str:
 
 
 def openviking_read(uri: str) -> str:
-    """读取单个 OpenViking 文件内容"""
+    """读取 OpenViking 文件内容
+
+    支持单个 URI 字符串或 URI 列表（数组）：
+    - 单个字符串 → 直接返回文件内容
+    - 列表 → 逐个读取并聚合返回（多文件读取）
+    """
+    if isinstance(uri, list):
+        return _aggregate_read(uri)
     try:
         result = _ov_get("/api/v1/content/read", params={"uri": uri})
         if "error" in result:
@@ -139,11 +146,8 @@ def openviking_read(uri: str) -> str:
         return json.dumps({"error": f"读取失败 - {str(e)}"}, ensure_ascii=False)
 
 
-def openviking_multi_read(uris: list) -> str:
-    """批量读取多个 OpenViking 文件
-
-    服务端无 /api/v1/multi_read 接口，改为逐个调用单文件接口聚合返回。
-    """
+def _aggregate_read(uris: list) -> str:
+    """批量读取多个 OpenViking 文件：逐个调用单文件接口聚合返回"""
     if not uris:
         return json.dumps({"error": "uris 列表为空"}, ensure_ascii=False)
     results = []

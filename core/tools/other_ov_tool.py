@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """other_ov_tool：OpenViking 其他工具合集（除 search/remember/read 外）
 
-合并了 9 个子工具（multi_read / list_dir / write_file / session 系列），
+合并了 8 个子工具（list_dir / write_file / session 系列），
 通过参数在 查询 与 执行 之间切换：
   - all=true                        → 列出合集内所有工具及说明（不含使用方式）
   - tool='openviking_xxx'           → 返回该工具的使用方式（不执行）
@@ -10,7 +10,6 @@
 import json
 
 from .ov_tools import (
-    openviking_multi_read,
     openviking_list_dir,
     openviking_write_file,
     openviking_create_session,
@@ -23,7 +22,6 @@ from .ov_tools import (
 
 # 合集内子工具：工具名 → 简短说明（供 all=true 列出）
 OTHER_OV_TOOLS = {
-    "openviking_multi_read": "批量读取多个 OpenViking 记忆文件，一次性返回所有文件内容",
     "openviking_list_dir": "列出 OpenViking 指定目录下的所有文件和子目录，支持递归",
     "openviking_write_file": "写入/追加内容到 OpenViking 记忆文件（create/replace/append 三种模式）",
     "openviking_create_session": "创建新的对话 Session，用于保存一段完整对话历史，返回 session_id",
@@ -36,12 +34,6 @@ OTHER_OV_TOOLS = {
 
 # 合集内子工具：工具名 → 使用方式（参数、必填、示例，供仅 tool 时返回）
 OTHER_OV_USAGES = {
-    "openviking_multi_read": (
-        "批量读取多个 OpenViking 记忆文件。\n"
-        "必填参数:\n"
-        "  uris (array of string) - 要读取的文件 URI 列表\n"
-        "示例: {\"uris\": [\"viking://user/{user}/.../a.md\", \"viking://user/{user}/.../b.md\"]}"
-    ),
     "openviking_list_dir": (
         "列出 OpenViking 指定目录下的所有文件和子目录。\n"
         "必填参数:\n"
@@ -98,7 +90,6 @@ OTHER_OV_USAGES = {
 
 # 子工具名 → 实际执行函数 映射
 TOOL_HANDLERS = {
-    "openviking_multi_read": lambda a: openviking_multi_read(a.get('uris', [])),
     "openviking_list_dir": lambda a: openviking_list_dir(a.get('uri', ''), a.get('recursive', False)),
     "openviking_write_file": lambda a: openviking_write_file(a.get('uri', ''), a.get('content', ''), a.get('mode', 'replace')),
     "openviking_create_session": lambda a: openviking_create_session(a.get('session_id', '')),

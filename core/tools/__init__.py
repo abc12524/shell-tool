@@ -148,13 +148,16 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "openviking_read",
-            "description": "通过 URI 读取 OpenViking 记忆中的单个 .md 文件内容。URI 格式: viking://user/{user}/...",
+            "description": "通过 URI 读取 OpenViking 记忆中的 .md 文件内容。uri 支持单个文件 URI 或 URI 数组（同时读取多个文件）。URI 格式: viking://user/{user}/...",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "uri": {
-                        "type": "string",
-                        "description": "文件的完整 URI，如 viking://user/p30/peers/default/memories/entities/home_snmp_ap_info.md"
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ],
+                        "description": "单个文件 URI，或文件 URI 数组，如 viking://user/p30/peers/default/memories/entities/home_snmp_ap_info.md"
                     }
                 },
                 "required": ["uri"]
@@ -165,7 +168,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "other_ov_tool",
-            "description": "OpenViking 其他工具合集（除 search/remember/read 外），含 9 个子工具：multi_read/list_dir/write_file/session 系列。all=true 列出所有工具及说明；tool=子工具名 查看使用方式；tool+arguments 实际执行子工具。",
+            "description": "OpenViking 其他工具合集（除 search/remember/read 外），含 8 个子工具：list_dir/write_file/session 系列。all=true 列出所有工具及说明；tool=子工具名 查看使用方式；tool+arguments 实际执行子工具。",
             "parameters": {
                 "type": "object",
                 "properties": {
