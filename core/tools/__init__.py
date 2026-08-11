@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
 """工具包：工具实现 + 工具定义（TOOLS schema）+ 工具调用分发器"""
+import asyncio
 import json
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# 并发执行时的打印锁，避免多线程输出交错
-_print_lock = threading.Lock()
-
-
-def _locked_print(*args, **kwargs):
-    with _print_lock:
-        print(*args, **kwargs)
 
 from .system_tools import get_system_info, execute_system_command
 from .search_tools import baidu_search
@@ -204,8 +195,8 @@ TOOL_FUNCTIONS = {
 }
 
 
-def _execute_single_tool(tool_call):
-    """执行单个工具调用，返回 tool 结果消息（供并发执行）"""
+async def _execute_single_tool(tool_call):
+    """异步执行单个工具调用，返回 tool 结果消息（供并发执行）"""
     if hasattr(tool_call, 'function'):
         function_name = tool_call.function.name
         arguments = json.loads(tool_call.function.arguments)
@@ -216,20 +207,20 @@ def _execute_single_tool(tool_call):
         arguments = json.loads(tool_call['function']['arguments'])
         call_id = tool_call['id']
 
-    _locked_print(f"🔧 执行工具: {function_name}")
-    _locked_print(f"📥 参数: {json.dumps(arguments, ensure_ascii=False)}")
+    print(f"🔧 执行工具: {function_name}")
+    print(f"📥 参数: {json.dumps(arguments, ensure_ascii=False)}")
 
-    # 执行对应函数
+    # 执行对应函数（同步阻塞函数放到线程池，不阻塞事件循环）
     handler = TOOL_FUNCTIONS.get(function_name)
     if handler:
         try:
-            result_str = handler(arguments)
+            result_str = await asyncio.to_thread(handler, arguments)
         except Exception as e:
             result_str = f"Error: 工具 {function_name} 执行失败 - {str(e)}"
     else:
         result_str = f"Error: 未知工具 {function_name}"
 
-    _locked_print(f"📤 结果: {result_str[:200]}{'...' if len(result_str) > 200 else ''}")
+    print(f"📤 结果: {result_str[:200]}{'...' if len(result_str) > 200 else ''}")
 
     return {
         "role": "tool",
@@ -238,19 +229,18 @@ def _execute_single_tool(tool_call):
     }
 
 
-def process_tool_calls(tool_calls):
-    """异步（并发）执行工具调用，返回 tool 结果消息列表（role=tool）
+async def process_tool_calls(tool_calls):
+    """异步并发执行工具调用，返回 tool 结果消息列表（role=tool）
 
-    本轮全部工具调用通过线程池并行执行，结果一次性回传；
+    本轮全部工具调用通过 asyncio 并发调度执行，无同步屏障
+    （不等待最慢者才继续，各自完成各自返回）；
     返回顺序与输入 tool_calls 保持一致（各结果自带 tool_call_id 关联）。
     """
     if not tool_calls:
         return []
 
-    max_workers = min(len(tool_calls), 8)
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_execute_single_tool, tc) for tc in tool_calls]
-        # 按原始顺序收集，保持 tool_call_id 与 assistant.tool_calls 对应
-        results = [fut.result() for fut in futures]
+    # 并发创建全部任务，统一收集（asyncio 原生并发，非线程池阻塞等待）
+    tasks = [asyncio.create_task(_execute_single_tool(tc)) for tc in tool_calls]
+    results = await asyncio.gather(*tasks)
 
     return results

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """CLI 主流程：参数解析、session 管理、记忆注入、对话执行"""
+import asyncio
 import os
 import sys
 import time
 from datetime import datetime
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from . import config
 from . import db
@@ -105,6 +106,11 @@ def print_usage_stats(usage):
 
 
 def main():
+    """CLI 入口（async 包装，供 asyncio.run 调用）"""
+    asyncio.run(_async_main())
+
+
+async def _async_main():
     new_flag, sid, question = parse_args(sys.argv)
 
     if not question:
@@ -123,7 +129,7 @@ def main():
 
     session_id, is_new = resolve_session(new_flag, sid)
 
-    client = OpenAI(
+    client = AsyncOpenAI(
         api_key=config.DEEPSEEK_API_KEY,
         base_url=config.DEEPSEEK_BASE_URL,
     )
@@ -155,7 +161,7 @@ def main():
 
     print(f"\n👤 用户问题: {question}")
     full_content, full_reasoning, final_usage, assistant_msg, tool_results, new_history_msgs = \
-        llm.chat_completion_with_tools(client, messages, session_id=session_id)
+        await llm.chat_completion_with_tools(client, messages, session_id=session_id)
 
     print(f"\n✅ 对话已保存到会话: {session_id}")
     print_usage_stats(final_usage)

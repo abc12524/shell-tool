@@ -11,8 +11,8 @@ def clean_messages_for_api(messages):
     return messages
 
 
-def stream_api_call(client, messages):
-    """调用 API 流式接口，返回 (content, reasoning, tool_calls, usage)"""
+async def stream_api_call(client, messages):
+    """异步调用 API 流式接口，返回 (content, reasoning, tool_calls, usage)"""
     cleaned = clean_messages_for_api(messages)
     if config.DEBUG_SEND_SEQ:
         import hashlib, json
@@ -21,7 +21,7 @@ def stream_api_call(client, messages):
             _blob = json.dumps(_m, ensure_ascii=False, sort_keys=True)
             _dbg.append(f"{_m['role']}:{hashlib.md5(_blob.encode()).hexdigest()[:6]}")
         print("DBGSEQ> " + " | ".join(_dbg))
-    stream = client.chat.completions.create(
+    stream = await client.chat.completions.create(
         model=config.DEEPSEEK_MODEL,
         messages=cleaned,
         tools=TOOLS,
@@ -35,7 +35,7 @@ def stream_api_call(client, messages):
     usage = None
     tool_calls = []
 
-    for chunk in stream:
+    async for chunk in stream:
         if chunk.choices and len(chunk.choices) > 0:
             delta = chunk.choices[0].delta
 
@@ -88,7 +88,7 @@ def build_assistant_msg(content, reasoning, tool_calls_list):
     return msg
 
 
-def chat_completion_with_tools(client, messages, session_id=None):
+async def chat_completion_with_tools(client, messages, session_id=None):
     """按 think.txt 官方推荐流程优化工具调用：
 
       请求 1.1  输入[工具, 问题1]      → 输出 思维链1.1 + 工具调用1.1
@@ -96,14 +96,15 @@ def chat_completion_with_tools(client, messages, session_id=None):
                                    → 输出 思维链1.2 + 回答1
 
       工具只在开始时批量调用一次（MAX_TOOL_ROUNDS），
-      一次拿到的所有工具调用并行执行，结果一次性回传，之后直接输出最终回答。
+      一次拿到的所有工具调用并行执行（asyncio 并发，无同步屏障），
+      结果一次性回传，之后直接输出最终回答。
       若模型在最终回答轮仍请求调用工具（依赖链场景），
       在 MAX_TOOL_ROUNDS 预算内可再执行，超出则强制基于已有结果作答。
 
       返回: (content, reasoning, usage, assistant_msg, all_tool_results, new_history_messages)
     """
     # ---- 请求 1.1：工具 + 问题 → 思维链 + 工具调用 ----
-    content, reasoning, tool_calls, usage = stream_api_call(client, messages)
+    content, reasoning, tool_calls, usage = await stream_api_call(client, messages)
     assistant_msg = build_assistant_msg(content, reasoning, tool_calls)
 
     # 无工具调用 → 直接返回最终回答
@@ -125,8 +126,8 @@ def chat_completion_with_tools(client, messages, session_id=None):
         print("\n" + "=" * 30)
         print(f"🔧 执行工具 (第{tool_rounds}轮): {len(tool_calls)} 个调用")
 
-        # 一次并发执行本轮全部工具调用，结果一次性回传
-        tool_results = process_tool_calls(tool_calls)
+        # 一次并发执行本轮全部工具调用（异步无同步屏障），结果一次性回传
+        tool_results = await process_tool_calls(tool_calls)
         all_tool_results.extend(tool_results)
 
         new_history_messages.append(assistant_msg)
@@ -139,7 +140,7 @@ def chat_completion_with_tools(client, messages, session_id=None):
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
         print("\n" + "=" * 30)
         print("🤔 继续推理...")
-        content, reasoning, tool_calls, usage = stream_api_call(client, messages)
+        content, reasoning, tool_calls, usage = await stream_api_call(client, messages)
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls)
 
     # ---- 预算耗尽但仍想调工具 → 强制给出最终回答 ----
@@ -150,7 +151,7 @@ def chat_completion_with_tools(client, messages, session_id=None):
         }
         print("\n⚠️ 工具调用次数已达上限，强制基于已有结果给出最终回答")
         messages.append(force_msg)
-        content, reasoning, tool_calls, usage = stream_api_call(client, messages)
+        content, reasoning, tool_calls, usage = await stream_api_call(client, messages)
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls)
         new_history_messages.append(force_msg)
         if session_id:
