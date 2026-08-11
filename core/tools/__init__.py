@@ -232,15 +232,25 @@ async def _execute_single_tool(tool_call):
 async def process_tool_calls(tool_calls):
     """异步并发执行工具调用，返回 tool 结果消息列表（role=tool）
 
-    本轮全部工具调用通过 asyncio 并发调度执行，无同步屏障
-    （不等待最慢者才继续，各自完成各自返回）；
-    返回顺序与输入 tool_calls 保持一致（各结果自带 tool_call_id 关联）。
+    无同步屏障：任务全部并发发起，谁先完成谁先返回（as_completed 逐个交付），
+    不等待最慢者；返回列表按输入顺序排列（各结果自带 tool_call_id 关联），
+    但执行/交付过程是流式的——快任务完成即输出，慢任务稍后跟上。
     """
     if not tool_calls:
         return []
 
-    # 并发创建全部任务，统一收集（asyncio 原生并发，非线程池阻塞等待）
+    # 并发创建全部任务，无屏障逐个收集完成结果（FIRST_COMPLETED 循环）
     tasks = [asyncio.create_task(_execute_single_tool(tc)) for tc in tool_calls]
-    results = await asyncio.gather(*tasks)
+    idx_map = {id(t): i for i, t in enumerate(tasks)}
+    results = [None] * len(tool_calls)
+    done_count = 0
+    pending = set(tasks)
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            idx = idx_map[id(t)]
+            results[idx] = t.result()
+            done_count += 1
+            print(f"⚡ 工具完成 ({done_count}/{len(tool_calls)}): {results[idx]['tool_call_id']}")
 
     return results
