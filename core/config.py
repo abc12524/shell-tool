@@ -30,12 +30,21 @@ OV_SCORE_THRESHOLD = float(os.environ.get('OV_SCORE_THRESHOLD', '0.35'))
 OV_SEARCH_LIMIT = int(os.environ.get('OV_SEARCH_LIMIT', '3'))
 OV_INJECT_LIMIT = int(os.environ.get('OV_INJECT_LIMIT', '5'))
 
-# ===== MySQL 存储 =====
+# ===== 数据库存储 =====
+# DB_ONLINE: true=在线 MySQL；false=本地 SQLite（MySQL 连接失败也会自动降级 SQLite）
+DB_ONLINE = os.environ.get('DB_ONLINE', 'true') in ('1', 'true', 'True', 'yes')
+# 本地 SQLite 文件路径（DB_ONLINE=false 或 MySQL 不可用时使用）
+SQLITE_DB_PATH = os.environ.get('SQLITE_DB_PATH', os.path.join(PROJECT_ROOT, 'data', 'shell_tool.db'))
+
+# ===== MySQL 在线存储 =====
 DB_CONFIG = {
     'host': os.environ.get('MYSQL_HOST', ''),
     'user': os.environ.get('MYSQL_USER', ''),
     'password': os.environ.get('MYSQL_PASSWORD', ''),
     'database': os.environ.get('MYSQL_DB', ''),
-    'port': int(os.environ.get('MYSQL_PORT', '')),
+    'port': int(os.environ.get('MYSQL_PORT', '3306') or '3306'),
     'charset': 'utf8mb4',
 }
+
+# 是否已配置 MySQL 连接信息（host/user/database 任一为空视为未配置）
+DB_CONFIGURED = bool(DB_CONFIG['host'] and DB_CONFIG['user'] and DB_CONFIG['database'])

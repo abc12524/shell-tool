@@ -46,31 +46,57 @@ def parse_args(argv):
     return new_flag, sid, ' '.join(question_parts)
 
 
-def resolve_session(new_flag, sid):
+# 记录最近一次使用的后端，用于检测 mysql↔sqlite 切换（切换时强制新开 session）
+BACKEND_MARKER_PATH = os.path.join(config.PROJECT_ROOT, 'data', '.last_backend')
+
+
+def _read_last_backend():
+    try:
+        with open(BACKEND_MARKER_PATH) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _write_last_backend(backend):
+    os.makedirs(os.path.dirname(BACKEND_MARKER_PATH) or '.', exist_ok=True)
+    with open(BACKEND_MARKER_PATH, 'w') as f:
+        f.write(backend)
+
+
+def resolve_session(new_flag, sid, backend):
     """确定会话：
-       -s <id>     → 使用指定会话
-       -n          → 终结当前所有活跃会话，新开
-       默认        → 同一对话：复用最近活跃会话，无则新建
+       -s <id>     → 使用指定会话（在当前后端库内查找）
+       -n          → 终结当前后端所有活跃会话，新开
+       默认        → 同一后端内复用最近活跃会话，无则新建
+       mysql↔sqlite 切换 → 立即新开会话（以 data/.last_backend 标记判断），
+                          同库内原会话保持不动，对话持续
        (session_id, is_new)
     """
     if sid:
         if not db.session_exists(sid):
             print(f"⚠️  会话 {sid} 不存在")
             sys.exit(1)
+        _write_last_backend(backend)
         return sid, False
 
-    if new_flag:
+    last_backend = _read_last_backend()
+    switched = last_backend is not None and last_backend != backend
+    if new_flag or switched:
         db.close_all_active_sessions()
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         db.create_session(session_id)
+        _write_last_backend(backend)
         return session_id, True
 
-    # 默认同一对话
+    # 默认同一后端内同一对话
     session_id = db.get_active_session_id()
     if session_id is None:
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         db.create_session(session_id)
+        _write_last_backend(backend)
         return session_id, True
+    _write_last_backend(backend)
     return session_id, False
 
 
@@ -122,12 +148,16 @@ async def _async_main():
         sys.exit(1)
 
     try:
-        db.init_schema()
+        backend = db.resolve_backend()
     except Exception as e:
-        print(f"❌ MySQL 初始化失败：{e}")
+        print(f"❌ 数据库初始化失败：{e}")
         sys.exit(1)
+    if backend == 'sqlite':
+        print("🗄️  使用本地 SQLite 数据库")
+    else:
+        print("🗄️  使用在线 MySQL 数据库")
 
-    session_id, is_new = resolve_session(new_flag, sid)
+    session_id, is_new = resolve_session(new_flag, sid, backend)
 
     client = AsyncOpenAI(
         api_key=config.DEEPSEEK_API_KEY,
