@@ -34,7 +34,8 @@ OV_INJECT_LIMIT = int(os.environ.get('OV_INJECT_LIMIT', '5'))
 # DB_ONLINE: true=在线 MySQL；false=本地 SQLite（MySQL 连接失败也会自动降级 SQLite）
 DB_ONLINE = os.environ.get('DB_ONLINE', 'true') in ('1', 'true', 'True', 'yes')
 # 本地 SQLite 文件路径（DB_ONLINE=false 或 MySQL 不可用时使用）
-SQLITE_DB_PATH = os.environ.get('SQLITE_DB_PATH', os.path.join(PROJECT_ROOT, 'data', 'shell_tool.db'))
+# 注意：.env 中留空时必须回退默认值，否则 sqlite3.connect('') 会打开内存库导致表丢失
+SQLITE_DB_PATH = os.environ.get('SQLITE_DB_PATH') or os.path.join(PROJECT_ROOT, 'data', 'shell_tool.db')
 
 # ===== MySQL 在线存储 =====
 DB_CONFIG = {
