@@ -251,6 +251,6 @@ async def process_tool_calls(tool_calls):
             idx = idx_map[id(t)]
             results[idx] = t.result()
             done_count += 1
-            print(f"⚡ 工具完成 ({done_count}/{len(tool_calls)}): {results[idx]['tool_call_id']}")
+            # print(f"⚡ 工具完成 ({done_count}/{len(tool_calls)}): {results[idx]['tool_call_id']}")
 
     return results
