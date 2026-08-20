@@ -1,4 +1,4 @@
-openai>=1.0
+openai>=1.66
 requests
 pymysql
 flask
