@@ -180,6 +180,9 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "web_search",
+    },
 ]
 
 

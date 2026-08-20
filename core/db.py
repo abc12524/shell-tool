@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     tool_calls_json   TEXT NULL,
     tool_call_id      TEXT NULL,
     reasoning_content TEXT NULL,
+    output_items_json TEXT NULL,
     created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_session_id ON chat_messages (session_id, id);
@@ -114,6 +115,7 @@ def _init_schema_mysql():
         tool_calls_json TEXT NULL,
         tool_call_id   VARCHAR(64) NULL,
         reasoning_content MEDIUMTEXT NULL,
+        output_items_json TEXT NULL,
         created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         KEY idx_session_id (session_id, id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -126,6 +128,9 @@ def _init_schema_mysql():
             cur.execute("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_messages' AND COLUMN_NAME='reasoning_content'")
             if cur.fetchone()['COUNT(*)'] == 0:
                 cur.execute("ALTER TABLE chat_messages ADD COLUMN reasoning_content MEDIUMTEXT NULL AFTER tool_call_id")
+            cur.execute("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_messages' AND COLUMN_NAME='output_items_json'")
+            if cur.fetchone()['COUNT(*)'] == 0:
+                cur.execute("ALTER TABLE chat_messages ADD COLUMN output_items_json TEXT NULL AFTER reasoning_content")
         conn.commit()
 
 
@@ -137,6 +142,8 @@ def _init_schema_sqlite():
         cols = [row['name'] for row in conn.execute("PRAGMA table_info(chat_messages)")]
         if 'reasoning_content' not in cols:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN reasoning_content TEXT")
+        if 'output_items_json' not in cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN output_items_json TEXT")
         conn.commit()
 
 
@@ -245,22 +252,24 @@ def _mysql_append_messages(session_id, messages):
         with conn.cursor() as cur:
             for m in messages:
                 tool_calls = m.get('tool_calls')
+                output_items = m.get('output_items')
                 cur.execute(
-                    "INSERT INTO chat_messages (session_id, role, content, tool_calls_json, tool_call_id, reasoning_content) "
-                    "VALUES (%s,%s,%s,%s,%s,%s)",
+                    "INSERT INTO chat_messages (session_id, role, content, tool_calls_json, tool_call_id, reasoning_content, output_items_json) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s)",
                     (session_id,
                      m.get('role'),
                      m.get('content'),
                      json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
                      m.get('tool_call_id'),
-                     m.get('reasoning_content')))
+                     m.get('reasoning_content'),
+                     json.dumps(output_items, ensure_ascii=False) if output_items else None))
             # 触碰会话更新时间，保证"默认同一对话"能找到最近会话
             cur.execute("UPDATE chat_sessions SET updated_at=NOW() WHERE id=%s", (session_id,))
         conn.commit()
 
 
 def _mysql_load_messages(session_id):
-    sql = ("SELECT role, content, tool_calls_json, tool_call_id, reasoning_content FROM chat_messages "
+    sql = ("SELECT role, content, tool_calls_json, tool_call_id, reasoning_content, output_items_json FROM chat_messages "
            "WHERE session_id=%s ORDER BY id")
     with _mysql_conn() as conn:
         with conn.cursor() as cur:
@@ -326,15 +335,17 @@ def _sqlite_append_messages(session_id, messages):
     with _sqlite_conn() as conn:
         for m in messages:
             tool_calls = m.get('tool_calls')
+            output_items = m.get('output_items')
             conn.execute(
-                "INSERT INTO chat_messages (session_id, role, content, tool_calls_json, tool_call_id, reasoning_content) "
-                "VALUES (?,?,?,?,?,?)",
+                "INSERT INTO chat_messages (session_id, role, content, tool_calls_json, tool_call_id, reasoning_content, output_items_json) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (session_id,
                  m.get('role'),
                  m.get('content'),
                  json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
                  m.get('tool_call_id'),
-                 m.get('reasoning_content')))
+                 m.get('reasoning_content'),
+                 json.dumps(output_items, ensure_ascii=False) if output_items else None))
         # 触碰会话更新时间，保证"默认同一对话"能找到最近会话
         conn.execute("UPDATE chat_sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
         conn.commit()
@@ -343,7 +354,7 @@ def _sqlite_append_messages(session_id, messages):
 def _sqlite_load_messages(session_id):
     with _sqlite_conn() as conn:
         rows = conn.execute(
-            "SELECT role, content, tool_calls_json, tool_call_id, reasoning_content FROM chat_messages "
+            "SELECT role, content, tool_calls_json, tool_call_id, reasoning_content, output_items_json FROM chat_messages "
             "WHERE session_id=? ORDER BY id", (session_id,)
         ).fetchall()
     return _build_msgs(rows)
@@ -362,6 +373,8 @@ def _build_msgs(rows):
             }
             if row['reasoning_content']:
                 m['reasoning_content'] = row['reasoning_content']
+            if row['output_items_json']:
+                m['output_items'] = json.loads(row['output_items_json'])
             msgs.append(m)
         else:
             m = {'role': role, 'content': row['content'] or ''}
@@ -369,6 +382,8 @@ def _build_msgs(rows):
                 m['tool_call_id'] = row['tool_call_id']
             if role == 'assistant' and row['reasoning_content']:
                 m['reasoning_content'] = row['reasoning_content']
+            if role == 'assistant' and row['output_items_json']:
+                m['output_items'] = json.loads(row['output_items_json'])
             msgs.append(m)
 
     # 保证消息序列合法：开头不能是孤立的 tool 结果或未配对的 tool_calls

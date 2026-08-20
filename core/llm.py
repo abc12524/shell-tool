@@ -29,18 +29,25 @@ def to_responses_input(messages):
             items.append({"role": role, "content": m.get('content') or ''})
         elif role == 'assistant':
             tool_calls = m.get('tool_calls') or []
-            if m.get('content'):
-                items.append({"role": "assistant", "content": m['content']})
-            for tc in tool_calls:
-                fn = tc.get('function', {}) if isinstance(tc, dict) else tc.function
-                items.append({
-                    "type": "function_call",
-                    "call_id": tc.get('id') if isinstance(tc, dict) else tc.id,
-                    "name": fn.get('name') if isinstance(fn, dict) else fn.name,
-                    "arguments": fn.get('arguments', '') if isinstance(fn, dict) else fn.arguments,
-                })
-            if not m.get('content') and not tool_calls:
-                items.append({"role": "assistant", "content": ''})
+            output_items = m.get('output_items')
+            if output_items:
+                # 服务端原始输出序列，原样透传（message/reasoning/web_search_call/function_call 保序）
+                for oi in output_items:
+                    items.append(oi)
+            else:
+                # 旧格式（无 output_items）fallback：拆分 message + function_call
+                if m.get('content'):
+                    items.append({"role": "assistant", "content": m['content']})
+                if m.get('reasoning_content'):
+                    items.append({"type": "reasoning", "content": [{"type": "reasoning_text", "text": m['reasoning_content']}]})
+                for tc in tool_calls:
+                    fn = tc.get('function', {}) if isinstance(tc, dict) else tc.function
+                    items.append({
+                        "type": "function_call",
+                        "call_id": tc.get('id') if isinstance(tc, dict) else tc.id,
+                        "name": fn.get('name') if isinstance(fn, dict) else fn.name,
+                        "arguments": fn.get('arguments', '') if isinstance(fn, dict) else fn.arguments,
+                    })
         elif role == 'tool':
             items.append({
                 "type": "function_call_output",
@@ -53,21 +60,23 @@ def to_responses_input(messages):
 def to_responses_tools(tools):
     """将聊天格式 tool schema 转换为 Responses API 格式。
 
-    聊天格式 name 嵌套在 function 下，Responses API 要求提升到工具顶层：
+    - function：name 嵌套在 function 下，Responses API 要求提升到工具顶层：
       {"type": "function", "function": {"name", "description", "parameters"}}
       → {"type": "function", "name", "description", "parameters"}
+    - web_search：服务端内置工具，原样透传
     """
     out = []
     for t in tools or []:
-        if t.get('type') != 'function':
-            continue
-        fn = t.get('function', {})
-        item = {"type": "function", "name": fn.get('name')}
-        if fn.get('description'):
-            item['description'] = fn['description']
-        if fn.get('parameters'):
-            item['parameters'] = fn['parameters']
-        out.append(item)
+        if t.get('type') == 'function':
+            fn = t.get('function', {})
+            item = {"type": "function", "name": fn.get('name')}
+            if fn.get('description'):
+                item['description'] = fn['description']
+            if fn.get('parameters'):
+                item['parameters'] = fn['parameters']
+            out.append(item)
+        elif t.get('type') == 'web_search':
+            out.append({"type": "web_search"})
     return out
 
 
@@ -99,9 +108,11 @@ def _normalize_usage(usage):
 
 
 async def stream_responses_api(client, messages):
-    """异步调用 Responses API 流式接口，返回 (content, reasoning, tool_calls, usage)
+    """异步调用 Responses API 流式接口，返回 (content, reasoning, tool_calls, output_items, usage)
 
     tool_calls 为聊天格式 dict 列表（兼容 DB 存储与 process_tool_calls），
+    output_items 为服务端 output 中可回传 items 的原始顺序序列
+    （message/reasoning/web_search_call/function_call，按原文回传），
     usage 为聊天格式属性对象（prompt_tokens/completion_tokens/...）。
     """
     instructions, input_items = _split_instructions(messages)
@@ -125,6 +136,8 @@ async def stream_responses_api(client, messages):
     content = ""
     reasoning = ""
     usage = None
+    output_items = []
+    search_header_shown = False
     # output_index → 累积中的 function_call
     fc_by_idx = {}
 
@@ -133,13 +146,23 @@ async def stream_responses_api(client, messages):
 
         if ctype == 'response.output_item.added':
             item = getattr(chunk, 'item', None)
-            if item is not None and getattr(item, 'type', None) == 'function_call':
+            if item is None:
+                continue
+            if getattr(item, 'type', None) == 'function_call':
                 idx = getattr(chunk, 'output_index', None)
                 fc_by_idx[idx] = {
                     'id': getattr(item, 'call_id', None),
                     'name': getattr(item, 'name', None),
                     'arguments': '',
                 }
+            elif getattr(item, 'type', None) == 'web_search_call':
+                if not search_header_shown:
+                    print("\n🔎 服务端网页搜索：")
+                    search_header_shown = True
+                print(f"  - 搜索调用 {getattr(item, 'id', '')} 已发起")
+
+        elif ctype.startswith('response.web_search_call.'):
+            print(f"  - 搜索状态: {ctype.split('.')[-1]}")
 
         elif ctype == 'response.function_call_arguments.delta':
             idx = getattr(chunk, 'output_index', None)
@@ -167,6 +190,9 @@ async def stream_responses_api(client, messages):
             resp = getattr(chunk, 'response', None)
             if resp is not None:
                 usage = _normalize_usage(getattr(resp, 'usage', None))
+                # 服务端完整 output 序列仅在最终 response.completed 中给出，
+                # 从这里按原始顺序提取，供下一轮原样回传（reasoning/web_search_call 必须保持顺序）
+                output_items = _extract_output_items(getattr(resp, 'output', None))
 
         elif ctype == 'response.failed':
             resp = getattr(chunk, 'response', None)
@@ -188,7 +214,26 @@ async def stream_responses_api(client, messages):
             "function": {"name": fc['name'], "arguments": fc['arguments']},
         })
 
-    return content, reasoning, tool_calls, usage
+    return content, reasoning, tool_calls, output_items, usage
+
+
+def _extract_output_items(output):
+    """从最终 response.output 提取全部可回传 items（message/reasoning/web_search_call/function_call），
+    保持原始交错顺序。
+
+    DeepSeek thinking 模式要求 reasoning_text 与 web_search_call 按原始顺序原样回传
+    （校验按原文与顺序比对），因此回传段必须是服务端 output 的忠实子序列。
+    """
+    out = []
+    for item in output or []:
+        if getattr(item, 'type', None) not in ('message', 'reasoning', 'web_search_call', 'function_call'):
+            continue
+        d = {}
+        for k, v in item.model_dump().items():
+            if v is not None:
+                d[k] = v
+        out.append(d)
+    return out
 
 
 def _split_instructions(messages):
@@ -200,11 +245,16 @@ def _split_instructions(messages):
     return instructions, input_items
 
 
-def build_assistant_msg(content, reasoning, tool_calls_list):
-    """构建可序列化的 assistant 消息（兼容 SDK 对象与 dict 两种 tool_calls）"""
+def build_assistant_msg(content, reasoning, tool_calls_list, output_items=None):
+    """构建可序列化的 assistant 消息（兼容 SDK 对象与 dict 两种 tool_calls）
+
+    output_items 为服务端原始输出序列，下一轮回传时优先原样透传（保证顺序与原文）。
+    """
     msg = {"role": "assistant", "content": content if content else ""}
     if reasoning:
         msg["reasoning_content"] = reasoning
+    if output_items:
+        msg["output_items"] = list(output_items)
     if tool_calls_list:
         serialized = []
         for tc in tool_calls_list:
@@ -247,11 +297,12 @@ async def chat_completion_with_tools(client, messages, session_id=None):
       返回: (content, reasoning, usage, assistant_msg, all_tool_results, new_history_messages)
     """
     # ---- 请求 1.1：工具 + 问题 → 思维链 + 工具调用 ----
-    content, reasoning, tool_calls, usage = await stream_responses_api(client, messages)
-    assistant_msg = build_assistant_msg(content, reasoning, tool_calls)
+    content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+    web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
+    assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
 
     # 无工具调用 → 直接返回最终回答
-    if not tool_calls:
+    if not tool_calls and not web_search_calls:
         return content, reasoning, usage, assistant_msg, [], [assistant_msg]
 
     all_tool_results = []
@@ -259,7 +310,7 @@ async def chat_completion_with_tools(client, messages, session_id=None):
     tool_rounds = 0
     forced_final = False
 
-    while tool_calls:
+    while tool_calls or web_search_calls:
         tool_rounds += 1
         if tool_rounds > config.MAX_TOOL_ROUNDS:
             # 工具预算耗尽 → 强制转入最终回答
@@ -267,9 +318,10 @@ async def chat_completion_with_tools(client, messages, session_id=None):
             break
 
         print("\n" + "=" * 30)
-        print(f"🔧 执行工具 (第{tool_rounds}轮): {len(tool_calls)} 个调用")
+        print(f"🔧 执行工具 (第{tool_rounds}轮): {len(tool_calls)} 个本地调用 / {len(web_search_calls)} 个服务端搜索")
 
-        # 一次并发执行本轮全部工具调用（异步无同步屏障），结果一次性回传
+        # 一次并发执行本轮全部 function 调用（异步无同步屏障），结果一次性回传；
+        # web_search_call 由服务端自动执行，仅随 assistant 消息原样回传供恢复结果
         tool_results = await process_tool_calls(tool_calls)
         all_tool_results.extend(tool_results)
 
@@ -283,8 +335,9 @@ async def chat_completion_with_tools(client, messages, session_id=None):
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
         print("\n" + "=" * 30)
         print("🤔 继续推理...")
-        content, reasoning, tool_calls, usage = await stream_responses_api(client, messages)
-        assistant_msg = build_assistant_msg(content, reasoning, tool_calls)
+        content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+        web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
+        assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
 
     # ---- 预算耗尽但仍想调工具 → 强制给出最终回答 ----
     if forced_final:
@@ -294,8 +347,9 @@ async def chat_completion_with_tools(client, messages, session_id=None):
         }
         print("\n⚠️ 工具调用次数已达上限，强制基于已有结果给出最终回答")
         messages.append(force_msg)
-        content, reasoning, tool_calls, usage = await stream_responses_api(client, messages)
-        assistant_msg = build_assistant_msg(content, reasoning, tool_calls)
+        content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+        web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
+        assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
         new_history_messages.append(force_msg)
         if session_id:
             db.append_messages(session_id, [force_msg, assistant_msg])
