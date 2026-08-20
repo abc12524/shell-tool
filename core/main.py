@@ -126,6 +126,7 @@ def print_usage_stats(usage):
     print(f"\n📊 Token 消耗统计：")
     print(f"   - 输入: {usage.prompt_tokens}")
     print(f"   - 输出: {usage.completion_tokens}")
+    print(f"   - 推理 token: {getattr(usage, 'reasoning_tokens', 0)}")
     print(f"   - 缓存命中 token: {getattr(usage, 'prompt_cache_hit_tokens', 0)}")
     print(f"   - 缓存未命中 token: {getattr(usage, 'prompt_cache_miss_tokens', 0)}")
     print(f"   - 总计: {usage.total_tokens}")
