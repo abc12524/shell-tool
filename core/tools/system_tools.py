@@ -5,7 +5,9 @@ import locale
 import os
 import platform
 import shutil
+import signal
 import subprocess
+import time
 
 
 def get_system_info():
@@ -54,6 +56,51 @@ def _ps_encode_command(command: str) -> list:
     return ['powershell.exe', '-Command', stripped]
 
 
+def run_cmd_reap(cmd_args: list, timeout: int):
+    """运行子进程并在超时/异常时杀掉整个进程组并回收，避免僵尸/孤儿。
+
+    关键点：
+    - 使用 start_new_session=True 让子进程成为独立会话/进程组 leader，
+      这样超时杀组时可以连带干掉它的所有子孙（如 bash -c 派生的 dpkg/gzip）。
+    - 超时后显式 killpg + 循环 waitpid 回收整个进程组，
+      否则被遗弃的子进程会被宿主(PID 1)收养并最终变成僵尸。
+    """
+    proc = subprocess.Popen(
+        cmd_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # 回收整个进程组（含所有子孙），避免遗漏
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    pid, _ = os.waitpid(-pgid, os.WNOHANG)
+                    if pid == 0:
+                        time.sleep(0.05)
+                        continue
+                except ChildProcessError:
+                    break
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+        raise
+
+
 def _decode_output(data: bytes) -> str:
     """尝试用 UTF-8 → GBK → 系统编码 逐级解码"""
     if not data:
@@ -76,33 +123,23 @@ def execute_system_command(command: str) -> str:
         # Windows 优先使用 PowerShell
         if os_type == 'windows':
             if shutil.which('powershell.exe'):
-                ps_args = _ps_encode_command(command)
-                result = subprocess.run(
-                    ps_args,
-                    capture_output=True, text=False, timeout=30
-                )
+                cmd_args = _ps_encode_command(command)
             else:
-                result = subprocess.run(
-                    ['cmd.exe', '/c', command],
-                    capture_output=True, text=False, timeout=30
-                )
+                cmd_args = ['cmd.exe', '/c', command]
         else:
             # Linux/macOS 使用 bash
             if shutil.which('bash'):
-                result = subprocess.run(
-                    ['/bin/bash', '-c', command],
-                    capture_output=True, text=False, timeout=30
-                )
+                cmd_args = ['/bin/bash', '-c', command]
             else:
-                result = subprocess.run(
-                    ['/bin/sh', '-c', command],
-                    capture_output=True, text=False, timeout=30
-                )
+                cmd_args = ['/bin/sh', '-c', command]
 
-        if result.stdout:
-            output = _decode_output(result.stdout)
-        elif result.stderr:
-            output = f"Error: {_decode_output(result.stderr)}"
+        # 使用带进程组回收的封装：超时会杀掉整个进程组并回收，杜绝僵尸
+        _, stdout, stderr = run_cmd_reap(cmd_args, timeout=3600)
+
+        if stdout:
+            output = _decode_output(stdout)
+        elif stderr:
+            output = f"Error: {_decode_output(stderr)}"
         else:
             output = "命令执行成功（无输出）"
 
@@ -113,6 +150,6 @@ def execute_system_command(command: str) -> str:
 
         return output
     except subprocess.TimeoutExpired:
-        return "Error: 命令执行超时（30秒）"
+        return "Error: 命令执行超时（1小时）"
     except Exception as e:
         return f"Error: 执行失败 - {str(e)}"

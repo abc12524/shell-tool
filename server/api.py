@@ -4,6 +4,8 @@ import subprocess
 import sys
 import os
 import json
+import signal
+import time
 
 app = Flask(__name__)
 # server/ 的上一级即项目根目录
@@ -75,6 +77,8 @@ def chat_stream():
         # 构建完整命令
         cmd = [PYTHON, DEEPSEEK_PATH] + args + [question]
 
+        # start_new_session=True：让 dp.py 成为独立进程组 leader，
+        # 客户端断开时能干净地杀掉它及其所有子孙，避免僵尸。
         process = subprocess.Popen(
             cmd,  # 使用完整的命令
             stdout=subprocess.PIPE,
@@ -82,26 +86,49 @@ def chat_stream():
             cwd=os.path.dirname(DEEPSEEK_PATH),
             env=env,
             bufsize=0,
+            start_new_session=True,
         )
 
-        # 流式处理输出...
-        buf = b""
-        while True:
-            byte = process.stdout.read(1)
-            if not byte:
-                if buf:
-                    yield f"data: {json.dumps({'type': 'content', 'content': buf.decode('utf-8', errors='replace')}, ensure_ascii=False)}\n\n"
-                break
-            buf += byte
+        try:
+            # 流式处理输出...
+            buf = b""
+            while True:
+                byte = process.stdout.read(1)
+                if not byte:
+                    if buf:
+                        yield f"data: {json.dumps({'type': 'content', 'content': buf.decode('utf-8', errors='replace')}, ensure_ascii=False)}\n\n"
+                    break
+                buf += byte
+                try:
+                    char = buf.decode("utf-8")
+                    yield f"data: {json.dumps({'type': 'content', 'content': char}, ensure_ascii=False)}\n\n"
+                    buf = b""
+                except UnicodeDecodeError:
+                    pass
+        finally:
+            # 无论正常结束还是客户端断开/异常，都必须回收子进程
             try:
-                char = buf.decode("utf-8")
-                yield f"data: {json.dumps({'type': 'content', 'content': char}, ensure_ascii=False)}\n\n"
-                buf = b""
-            except UnicodeDecodeError:
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, Exception):
                 pass
-
-        process.stdout.close()
-        process.wait()
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    pid, _ = os.waitpid(-process.pid, os.WNOHANG)
+                    if pid == 0:
+                        time.sleep(0.05)
+                        continue
+                except ChildProcessError:
+                    break
+            try:
+                process.wait(timeout=2)
+            except Exception:
+                pass
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
 
         yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
 
@@ -120,5 +147,21 @@ def health():
     return jsonify({"status": "ok", "service": "deepseek-api"})
 
 
+def _reap_orphans(*_args):
+    """PID 1 兜底回收：容器内本进程是 1 号进程，任何被遗弃的子进程
+    都会收养到本进程；若不回收就会变成永久僵尸。
+    subprocess 内部已能处理 ChildProcessError，故此处回收不会与之冲突。"""
+    try:
+        while True:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+    except ChildProcessError:
+        pass
+
+
 if __name__ == "__main__":
+    # 仅在作为 1 号进程（容器入口）时注册兜底回收
+    if os.getpid() == 1:
+        signal.signal(signal.SIGCHLD, _reap_orphans)
     app.run(host="0.0.0.0", port=8000, debug=False)
