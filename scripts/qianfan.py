@@ -11,18 +11,7 @@
   qianfan quota           — 查看剩余配额说明
 """
 import json, os, sys, requests
-from pathlib import Path
 from dotenv import load_dotenv
-#env_path = Path.home() / '.hermes' / '/opt/dlan/deepseek/.env'
-#key = None
-#if env_path.exists():
-#    for line in env_path.read_text().splitlines():
-#        if line.startswith('BAIDU_QIANFAN_KEY='):
-#            key = line.split('=', 1)[1].strip().strip("'\"")
-#            break
-#if not key:
-#    print('{"error": "BAIDU_QIANFAN_KEY not found in ~/.hermes/.env"}')
-#    sys.exit(1)
 load_dotenv()
 key = os.environ.get('BAIDU_QIANFAN_KEY', '')
 HEADERS = {'Content-Type': 'application/json'}
@@ -226,5 +215,3 @@ if mode == "raw":
     except Exception as e:
         print(json.dumps({"error": str(e)}, ensure_ascii=False))
         sys.exit(1)
-
-#print(json.dumps({"error": f"未知模式。用法: qianfan search/raw/baike/quota"}, ensure_ascii=False))

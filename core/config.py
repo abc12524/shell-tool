@@ -16,7 +16,8 @@ DEEPSEEK_BASE_URL = os.environ.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.co
 DEEPSEEK_MODEL = os.environ.get('DEEPSEEK_MODEL', 'deepseek-v4-flash')
 
 # ===== 工具调用 =====
-# 按 think.txt 官方推荐流程：工具只在对话开始时批量调用一次，之后直接给出最终回答
+# 工具调用最大轮数：对话开始批量并行执行模型请求的工具，结果一次性回传后给出最终回答；
+# 若模型在最终轮仍请求工具，在预算内可再执行，超出则强制基于已有结果作答。
 MAX_TOOL_ROUNDS = int(os.environ.get('MAX_TOOL_ROUNDS', '6'))
 
 # ===== 调试 =====

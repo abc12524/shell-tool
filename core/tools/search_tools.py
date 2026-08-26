@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """搜索类工具：baidu_search（调用 qianfan.py 子进程）"""
+import json
 import os
 import sys
+import subprocess
 
 from ..config import PROJECT_ROOT
 from .system_tools import run_cmd_reap
+from .envelope import ok, error
 
 
 def baidu_search(mode: str, query: str) -> str:
     """百度千帆搜索：调用 scripts/qianfan.py 获取搜索结果"""
     qianfan_script = os.path.join(PROJECT_ROOT, "scripts", "qianfan.py")
     if not os.path.exists(qianfan_script):
-        return '{"error": "qianfan.py 不存在"}'
+        return error("qianfan.py 不存在", code="missing_script")
     try:
         # 强制子进程使用 UTF-8 输出，避免 Windows 终端编码干扰
         env = os.environ.copy()
@@ -22,12 +25,18 @@ def baidu_search(mode: str, query: str) -> str:
             timeout=3600,
         )
         if stdout:
-            return stdout.decode('utf-8', errors='replace').strip()
+            text = stdout.decode('utf-8', errors='replace').strip()
+            # qianfan.py 本身已输出结构化 JSON，原样作为 result 透传
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                payload = {"raw": text}
+            return ok(payload)
         elif stderr:
-            return f'{{"error": "{stderr.decode("utf-8", errors="replace").strip()}"}}'
+            return error(stderr.decode('utf-8', errors='replace').strip(), code="search_failed")
         else:
-            return '{"error": "搜索无返回"}'
+            return error("搜索无返回", code="empty")
     except subprocess.TimeoutExpired:
-        return '{"error": "搜索超时（1小时）"}'
+        return error("搜索超时（1小时）", code="timeout")
     except Exception as e:
-        return f'{{"error": "搜索失败 - {str(e)}"}}'
+        return error(f"搜索失败 - {str(e)}", code="internal")

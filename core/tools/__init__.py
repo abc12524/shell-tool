@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
 from .search_tools import baidu_search
 from .ov_tools import (
@@ -188,7 +189,7 @@ TOOLS = [
 
 # 工具名 → 执行函数 映射
 TOOL_FUNCTIONS = {
-    "get_system_info": lambda args: json.dumps(get_system_info(), ensure_ascii=False, indent=2),
+    "get_system_info": lambda args: ok(get_system_info()),
     "execute_system_command": lambda args: execute_system_command(args.get('command', '')),
     "baidu_search": lambda args: baidu_search(args.get('mode', 'raw'), args.get('query', '')),
     "openviking_search": lambda args: openviking_search(args.get('query', ''), args.get('score_threshold'), args.get('limit')),

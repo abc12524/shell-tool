@@ -9,6 +9,8 @@ import signal
 import subprocess
 import time
 
+from .envelope import ok, error
+
 
 def get_system_info():
     """获取系统信息"""
@@ -134,22 +136,28 @@ def execute_system_command(command: str) -> str:
                 cmd_args = ['/bin/sh', '-c', command]
 
         # 使用带进程组回收的封装：超时会杀掉整个进程组并回收，杜绝僵尸
-        _, stdout, stderr = run_cmd_reap(cmd_args, timeout=3600)
+        returncode, stdout, stderr = run_cmd_reap(cmd_args, timeout=3600)
 
         if stdout:
             output = _decode_output(stdout)
         elif stderr:
-            output = f"Error: {_decode_output(stderr)}"
+            output = _decode_output(stderr)
         else:
             output = "命令执行成功（无输出）"
 
         # 限制输出长度，避免 token 过大
         max_length = 6000
+        truncated = False
         if len(output) > max_length:
             output = output[:max_length] + f"\n... (输出被截断，原长度 {len(output)} 字符)"
+            truncated = True
 
-        return output
+        return ok({
+            "output": output,
+            "exit_code": returncode,
+            "truncated": truncated,
+        })
     except subprocess.TimeoutExpired:
-        return "Error: 命令执行超时（1小时）"
+        return error("命令执行超时（1小时）", code="timeout")
     except Exception as e:
-        return f"Error: 执行失败 - {str(e)}"
+        return error(f"执行失败 - {str(e)}", code="internal")

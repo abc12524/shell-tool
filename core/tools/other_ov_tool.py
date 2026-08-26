@@ -9,6 +9,7 @@
 """
 import json
 
+from .envelope import ok, error, is_error
 from .ov_tools import (
     openviking_list_dir,
     openviking_write_file,
@@ -111,34 +112,30 @@ HELP_TEXT = (
 
 def _list_tools() -> str:
     """列出合集内所有工具的说明（不含使用方式）"""
-    out = {"success": True, "count": len(OTHER_OV_TOOLS), "tools": OTHER_OV_TOOLS}
-    return json.dumps(out, ensure_ascii=False, indent=2)
+    return ok({"count": len(OTHER_OV_TOOLS), "tools": OTHER_OV_TOOLS})
 
 
 def _get_usage(tool: str) -> str:
     """返回指定工具的使用方式"""
     usage = OTHER_OV_USAGES.get(tool)
     if not usage:
-        return json.dumps({
-            "error": f"未知工具 {tool}",
-            "可用工具": sorted(OTHER_OV_TOOLS.keys()),
-        }, ensure_ascii=False, indent=2)
-    return json.dumps({"tool": tool, "usage": usage}, ensure_ascii=False, indent=2)
+        return error(f"未知工具 {tool}", code="unknown_tool")
+    return ok({"tool": tool, "usage": usage})
 
 
 def _execute(tool: str, arguments: dict) -> str:
-    """执行指定子工具并返回结果"""
+    """执行指定子工具并返回结果（子工具已返回规范信封，原样透传）"""
     handler = TOOL_HANDLERS.get(tool)
     if not handler:
-        return json.dumps({
-            "error": f"未知工具 {tool}",
-            "可用工具": sorted(OTHER_OV_TOOLS.keys()),
-        }, ensure_ascii=False, indent=2)
+        return error(f"未知工具 {tool}", code="unknown_tool")
     try:
         result = handler(arguments or {})
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        # 子工具（list_dir/write_file/session 系列）已返回规范信封字符串
+        if isinstance(result, str):
+            return result
+        return ok(result)
     except Exception as e:
-        return json.dumps({"error": f"工具 {tool} 执行失败 - {str(e)}"}, ensure_ascii=False)
+        return error(f"工具 {tool} 执行失败 - {str(e)}", code="internal")
 
 
 def other_ov_tool(all: bool = False, tool: str = "", arguments: dict = None) -> str:
