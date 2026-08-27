@@ -91,24 +91,42 @@ def openviking_search(query: str, score_threshold: float = None, limit: int = No
             return json.dumps(result, ensure_ascii=False)
 
         raw = result.get("result") if isinstance(result, dict) else {}
-        mems = (raw.get("memories") if isinstance(raw, dict) else []) or []
-        hits = mems[:n]
+        if not isinstance(raw, dict):
+            raw = {}
+        # 语义检索结果分散在 memories / resources / skills 三段，需合并后按相关度排序
+        groups = [
+            ("memory", raw.get("memories")),
+            ("resource", raw.get("resources")),
+            ("skill", raw.get("skills")),
+        ]
+        hits = []
+        seen = set()
+        for default_ctype, items in groups:
+            for h in items or []:
+                if not isinstance(h, dict):
+                    continue
+                uri = h.get("uri", "")
+                if uri:
+                    if uri in seen:
+                        continue
+                    seen.add(uri)
+                hits.append({
+                    "uri": uri,
+                    "score": h.get("score", 0),
+                    "abstract": h.get("abstract", ""),
+                    "category": h.get("category", ""),
+                    "context_type": h.get("context_type") or default_ctype,
+                    "level": h.get("level", ""),
+                })
+        hits.sort(key=lambda x: x["score"], reverse=True)
+        hits = hits[:n]
         out = {
             "query": query,
             "score_threshold": threshold,
             "limit": n,
             "count": len(hits),
-            "memories": [
-                {
-                    "uri": h.get("uri", ""),
-                    "score": h.get("score", 0),
-                    "abstract": h.get("abstract", ""),
-                    "category": h.get("category", ""),
-                    "context_type": h.get("context_type", ""),
-                    "level": h.get("level", ""),
-                }
-                for h in hits
-            ],
+            "total": raw.get("total", len(hits)),
+            "results": hits,
         }
         if not hits:
             out["message"] = "未找到相关记忆"
@@ -244,17 +262,36 @@ def openviking_load_context(query: str) -> str:
             "score_threshold": config.OV_SCORE_THRESHOLD,
             "limit": config.OV_INJECT_LIMIT,
         })
-        mems = result.get("result", {}).get("memories", []) if isinstance(result, dict) else []
-        hits = mems[:config.OV_INJECT_LIMIT]
+        raw = result.get("result", {}) if isinstance(result, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        # memories / resources / skills 三段的检索结果合并（同类去重），保留相关度
+        merged = []
+        seen = set()
+        for default_ctype, items in (
+            ("memory", raw.get("memories")),
+            ("resource", raw.get("resources")),
+            ("skill", raw.get("skills")),
+        ):
+            for h in items or []:
+                if not isinstance(h, dict):
+                    continue
+                uri = h.get("uri", "")
+                if uri:
+                    if uri in seen:
+                        continue
+                    seen.add(uri)
+                merged.append((h.get("score", 0), uri,
+                               h.get("abstract", ""),
+                               h.get("context_type") or default_ctype))
+        merged.sort(key=lambda x: x[0], reverse=True)
+        hits = merged[:config.OV_INJECT_LIMIT]
         if not hits:
             return ""
         ctx_parts = ["## 📖 相关记忆"]
-        for h in hits:
-            uri = h.get("uri", "")
-            abstract = h.get("abstract", "")
-            score = h.get("score", 0)
+        for score, uri, abstract, ctype in hits:
             if abstract:
-                ctx_parts.append(f"- [{uri}] (score={score:.2f})\n  {abstract[:300]}")
+                ctx_parts.append(f"- [{uri}] (score={score:.2f}, {ctype})\n  {abstract[:300]}")
         return "\n".join(ctx_parts)
     except Exception:
         return ""
