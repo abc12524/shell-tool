@@ -73,11 +73,11 @@ def _ov_get(path, params=None, timeout=15):
         r.raise_for_status()
         return r.json()
     except requests.Timeout:
-        return error("OpenViking 请求超时", code="timeout")
+        return json.loads(error("OpenViking 请求超时", code="timeout"))
     except requests.HTTPError as e:
-        return error(f"OpenViking HTTP 错误 - {e}", code="http")
+        return json.loads(error(f"OpenViking HTTP 错误 - {e}", code="http"))
     except Exception as e:
-        return error(f"OpenViking 请求失败 - {str(e)}", code="transport")
+        return json.loads(error(f"OpenViking 请求失败 - {str(e)}", code="transport"))
 
 
 def _ov_post(path, payload, timeout=15):
@@ -88,11 +88,11 @@ def _ov_post(path, payload, timeout=15):
         r.raise_for_status()
         return r.json()
     except requests.Timeout:
-        return error("OpenViking 请求超时", code="timeout")
+        return json.loads(error("OpenViking 请求超时", code="timeout"))
     except requests.HTTPError as e:
-        return error(f"OpenViking HTTP 错误 - {e}", code="http")
+        return json.loads(error(f"OpenViking HTTP 错误 - {e}", code="http"))
     except Exception as e:
-        return error(f"OpenViking 请求失败 - {str(e)}", code="transport")
+        return json.loads(error(f"OpenViking 请求失败 - {str(e)}", code="transport"))
 
 
 # ============= 官方结构对齐：召回/注入辅助 =============
@@ -294,7 +294,7 @@ def openviking_remember(category: str, name: str, content: str) -> str:
             if "NOT_FOUND" in err_text or "not found" in err_text.lower():
                 write_result = _ov_post(
                     "/api/v1/content/write",
-                    {"uri": uri, "content": content, "mode": "create", "wait": False},
+                    {"uri": uri, "content": content, "mode": "create", "wait": True},
                     timeout=30,
                 )
         if is_error(write_result):
