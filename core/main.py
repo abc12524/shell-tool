@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from . import config
 from . import db
 from . import llm
+from .tools import get_system_info
 from .tools.ov_tools import (
     openviking_load_context,
     openviking_load_profile,

@@ -47,6 +47,10 @@ OV_PROFILE_TOKEN_BUDGET = int(os.environ.get('OV_PROFILE_TOKEN_BUDGET', '1000'))
 OV_MIN_QUERY_LENGTH = int(os.environ.get('OV_MIN_QUERY_LENGTH', '3'))
 # 会话自动捕获/提交开关：true=把对话写入 OV session 并 commit 触发记忆提取
 OV_AUTO_CAPTURE = os.environ.get('OV_AUTO_CAPTURE', 'false') in ('1', 'true', 'True', 'yes')
+# 自动捕获时的选择策略（对齐官方 openviking 插件）
+OV_CAPTURE_ASSISTANT_TURNS = os.environ.get('OV_CAPTURE_ASSISTANT_TURNS', 'true') in ('1', 'true', 'True', 'yes')
+OV_CAPTURE_MAX_LENGTH = int(os.environ.get('OV_CAPTURE_MAX_LENGTH', '24000') or '24000')
+OV_CAPTURE_TOOL_MAX_CHARS = int(os.environ.get('OV_CAPTURE_TOOL_MAX_CHARS', '2000') or '2000')
 
 # ===== 数据库存储 =====
 # DB_ONLINE: true=在线 MySQL；false=本地 SQLite（MySQL 连接失败也会自动降级 SQLite）

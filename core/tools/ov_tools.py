@@ -10,6 +10,7 @@
 import hashlib
 import json
 import os
+import re
 
 import requests
 
@@ -450,23 +451,83 @@ def openviking_load_profile() -> str:
         return ""
 
 
+_ACK_RE = re.compile(
+    r'^(?:ok|okay|k|yes|yep|no|nope|thanks|thank you|thx|done|收到|好的|好|嗯|可以|继续|'
+    r'不用|不需要|没了|好了)[.!?。！？\s]*$', re.I)
+_SLASH_RE = re.compile(r'^/[a-z0-9_-]{1,64}\b', re.I)
+
+
+def _has_enough_signal(text):
+    cjk = len(re.findall(r'[\u3400-\u9fff]', text))
+    alnum = len(re.findall(r'[a-z0-9]', text, re.I))
+    return cjk >= 4 or alnum >= 6 or len(text) >= 12
+
+
+def _is_punctuation_only(text):
+    return not re.search(r'[a-z0-9\u3400-\u9fff]', text, re.I)
+
+
+def _should_capture(text, role):
+    """对齐官方 capture-utils.shouldCaptureText 的轻量噪音过滤。
+
+    跳过：空、斜杠命令、纯 ack（收到/好的/ok…）、纯标点、过短（信号不足）。
+    工具结果摘要由调用方在转换时绕过此过滤（官方 tool 摘要不被丢弃）。
+    """
+    text = text.strip()
+    if not text:
+        return False
+    if role == 'user' and _SLASH_RE.match(text):
+        return False
+    if _ACK_RE.match(text):
+        return False
+    if _is_punctuation_only(text):
+        return False
+    if not _has_enough_signal(text):
+        return False
+    return True
+
+
 def _to_ov_messages(messages):
-    """把聊天格式消息转成 OV session 可接收的 {role,content} 列表，跳过注入的召回/profile 块。"""
+    """把聊天消息转成 OV session 的 {role,content} 列表。
+
+    对齐官方 openviking 插件的选择逻辑：
+    - 跳过自动注入的召回/profile 块（避免记忆回声）
+    - assistant 轮可由 OV_CAPTURE_ASSISTANT_TURNS 关闭
+    - 过滤 ack/斜杠命令/纯标点/过短 等噪音
+    - 工具结果转 user 并带前缀，且绕过噪音过滤（官方 tool 摘要不被丢弃）
+    - 超长内容按 OV_CAPTURE_MAX_LENGTH / 工具按 OV_CAPTURE_TOOL_MAX_CHARS 截断
+    """
     out = []
     for m in (messages or []):
         if not isinstance(m, dict):
             continue
         role = m.get('role')
         content = m.get('content') or ''
-        if role == 'user':
-            if RECALL_MARKER in content or PROFILE_MARKER in content:
+        if isinstance(content, list):
+            content = "\n".join(str(c) for c in content)
+        content = content or ""
+
+        # 跳过注入块（召回记忆 / 会话索引），防止把 OV 检索结果当对话回灌
+        if RECALL_MARKER in content or PROFILE_MARKER in content:
+            continue
+
+        if role == 'tool':
+            content = content[:config.OV_CAPTURE_TOOL_MAX_CHARS]
+            if not content.strip():
                 continue
-            out.append({"role": "user", "content": content})
-        elif role == 'assistant':
-            out.append({"role": "assistant", "content": content or ''})
-        elif role == 'tool':
-            # OV session 仅接受 user/assistant，工具结果转 user 并带前缀
-            out.append({"role": "user", "content": f"[工具结果] {content}"})
+            name = m.get('name') or ''
+            text = f"[工具结果 {name}] {content}" if name else f"[工具结果] {content}"
+            out.append({"role": "user", "content": text})
+            continue
+
+        if role == 'assistant' and not config.OV_CAPTURE_ASSISTANT_TURNS:
+            continue
+
+        content = content[:config.OV_CAPTURE_MAX_LENGTH]
+        if not _should_capture(content, role):
+            continue
+        ov_role = 'assistant' if role == 'assistant' else 'user'
+        out.append({"role": ov_role, "content": content})
     return out
 
 
