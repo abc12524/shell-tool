@@ -117,7 +117,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "openviking_remember",
-            "description": "将重要信息保存到 OpenViking 外置记忆中，以便后续对话回忆。适合保存：用户偏好、项目配置、关键决策、有用的操作经验。使用英文记录，中文有无法索引的bug",
+            "description": "将重要信息保存到 OpenViking 外置记忆中，以便后续对话回忆。适合保存：用户偏好、项目配置、关键决策、有用的操作经验。",
             "parameters": {
                 "type": "object",
                 "properties": {

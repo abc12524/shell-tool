@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import re
-import urllib.parse
 
 import requests
 
@@ -69,13 +68,6 @@ def _ov_headers():
 def _ov_get(path, params=None, timeout=15):
     """OpenViking GET 请求；失败返回错误信封 dict（不抛异常）"""
     try:
-        # 兼容旧版 requests：非 ASCII 查询参数（如含中文的 URI）需先 percent-encode，
-        # 否则 requests 会按 latin-1 编码 URL 抛 'latin-1 codec can't encode' 错误。
-        if params:
-            params = {
-                k: (urllib.parse.quote(str(v), safe="") if isinstance(v, str) else v)
-                for k, v in params.items()
-            }
         r = requests.get(f"{_ov_base()}{path}", headers=_ov_headers(),
                          params=params, timeout=timeout)
         r.raise_for_status()
