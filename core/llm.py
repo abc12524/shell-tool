@@ -337,7 +337,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
 
         # ---- 每步召回：工具结果回来后，基于完整批次重新检索相关记忆并注入 ----
         # 对齐官方 pre-step recall：query 含工具结果，下一次模型调用即带上新线索
-        step_recall = openviking_load_context(messages, session_id=ov_session_id)
+        step_recall = openviking_load_context(messages, session_id=session_id)
         if step_recall:
             recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
             messages.append(recall_msg)
@@ -361,7 +361,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         }
         print("\n⚠️ 工具调用次数已达上限，强制基于已有结果给出最终回答")
         messages.append(force_msg)
-        step_recall = openviking_load_context(messages, session_id=ov_session_id)
+        step_recall = openviking_load_context(messages, session_id=session_id)
         if step_recall:
             recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
             messages.append(recall_msg)

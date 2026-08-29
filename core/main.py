@@ -200,7 +200,7 @@ async def _async_main():
 
     # 自动检索候选记忆，注入到问题之后作为背景参考（入库，位置固定在该问题之后）
     print("🔍 搜索相关记忆...", end=" ", flush=True)
-    mem_context = openviking_load_context([{"role": "user", "content": question}], session_id=ov_session_id)
+    mem_context = openviking_load_context([{"role": "user", "content": question}], session_id=session_id)
     if mem_context:
         print("找到相关记忆，注入上下文")
         inject = ("[自动检索的候选记忆(相关性未经验证可能无关，仅作为背景线索)]\n"
