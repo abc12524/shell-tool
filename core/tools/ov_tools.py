@@ -136,35 +136,67 @@ def _search_payload(query, score_threshold=None, limit=None):
 
 # ============= 记忆 =============
 def _extract_memories(result):
-    """从 OpenViking 搜索响应中提取记忆列表。
+    """从 OpenViking 搜索响应中提取并归一化记忆列表。
 
     兼容多种后端返回结构（不同版本/部署可能字段不同）：
-      - {"result": {"memories": [...]}}
+      - {"result": {"memories": [...]}} / {"result": {"resources": [...], "skills": [...]}}
       - {"result": {"hits": [...]}} / {"result": {"data": {"memories": [...]}}}
       - {"result": [...]}（result 直接是列表）
       - {"memories": [...]}
-    返回 list，提取不到时返回空列表。
+    语义检索结果分散在 memories / resources / skills 三段，需合并、去重后按相关度排序。
     """
     if not isinstance(result, dict):
         return []
-    candidates = []
+
+    def _merge(raw):
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            items = []
+            # 优先合并 memories / resources / skills 三段，补全 context_type
+            for ctype, key in (("memory", "memories"), ("resource", "resources"), ("skill", "skills")):
+                seg = raw.get(key)
+                if isinstance(seg, list):
+                    for h in seg:
+                        if isinstance(h, dict) and not h.get("context_type"):
+                            h = dict(h)
+                            h["context_type"] = h.get("context_type") or ctype
+                        items.append(h)
+            # 若无三段，退回其它常见列表字段
+            if not items:
+                for key in ("hits", "items", "results", "memories"):
+                    v = raw.get(key)
+                    if isinstance(v, list):
+                        items = v
+                        break
+        else:
+            return []
+        # 按 uri 去重 + 按分数降序
+        seen = set()
+        merged = []
+        for h in items:
+            if not isinstance(h, dict):
+                continue
+            uri = h.get("uri", "")
+            if uri:
+                if uri in seen:
+                    continue
+                seen.add(uri)
+            merged.append(h)
+        merged.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return merged
+
     raw = result.get("result")
-    if isinstance(raw, dict):
-        candidates.append(raw)
-        data = raw.get("data")
-        if isinstance(data, dict):
-            candidates.append(data)
     if isinstance(raw, list):
-        return raw
-    if isinstance(result.get("memories"), list):
-        candidates.append(result)
-    if isinstance(result.get("hits"), list):
-        candidates.append(result)
-    for c in candidates:
-        for key in ("memories", "hits", "items", "results"):
-            v = c.get(key)
-            if isinstance(v, list):
-                return v
+        return _merge(raw)
+    if isinstance(raw, dict):
+        data = raw.get("data")
+        if isinstance(data, dict) and any(isinstance(data.get(k), list)
+                                          for k in ("memories", "resources", "skills", "hits", "items", "results")):
+            return _merge(data)
+        return _merge(raw)
+    if isinstance(result.get("memories"), list) or isinstance(result.get("hits"), list):
+        return _merge(result)
     return []
 
 
@@ -352,8 +384,9 @@ def openviking_load_context(messages) -> str:
             uri = h.get("uri", "")
             abstract = h.get("abstract", "")
             score = h.get("score", 0)
+            ctype = h.get("context_type", "")
             if abstract:
-                ctx_parts.append(f"- [{uri}] (score={score:.2f})\n  {abstract[:300]}")
+                ctx_parts.append(f"- [{uri}] (score={score:.2f}, {ctype})\n  {abstract[:300]}")
         return "\n".join(ctx_parts)
     except Exception:
         return ""
