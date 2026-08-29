@@ -215,6 +215,7 @@ def openviking_search(query: str, score_threshold: float = None, limit: int = No
     n = max(0, min(10, n))
     try:
         result = _ov_post("/api/v1/search/search", _search_payload(query, threshold, n))
+        raw = result.get("result")
         if is_error(result):
             return json.dumps(result, ensure_ascii=False)
 
