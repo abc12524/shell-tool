@@ -234,6 +234,8 @@ def openviking_search(query: str, score_threshold: float = None, limit: int = No
     n = max(0, min(10, n))
     try:
         result = _ov_post("/api/v1/search/search", _search_payload(query, threshold, n))
+        if not isinstance(result, dict):
+            return error(f"搜索记忆失败 - 响应格式异常: {str(result)[:300]}", code="internal")
         raw = result.get("result")
         if is_error(result):
             return json.dumps(result, ensure_ascii=False)
@@ -243,7 +245,7 @@ def openviking_search(query: str, score_threshold: float = None, limit: int = No
         # 放宽阈值到 0 再试一次，取结果更多的一次。
         if threshold > 0 and (len(mems) == 0 or (len(mems) <= 1 and threshold >= 0.3)):
             fallback = _ov_post("/api/v1/search/search", _search_payload(query, 0.0, n))
-            if not is_error(fallback):
+            if not isinstance(fallback, dict) or is_error(fallback):
                 fb = _extract_memories(fallback)
                 if len(fb) > len(mems):
                     mems = fb
@@ -421,7 +423,7 @@ def openviking_load_context(messages, session_id=None) -> str:
         if len(query) < config.OV_MIN_QUERY_LENGTH:
             return ""
         result = _ov_post("/api/v1/search/search", _search_payload(query, config.OV_INJECT_THRESHOLD))
-        if is_error(result):
+        if not isinstance(result, dict) or is_error(result):
             return ""
         mems = _extract_memories(result)
         mems, _ = _recall_dedup_filter(mems, session_id)
