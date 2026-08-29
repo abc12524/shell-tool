@@ -2,6 +2,7 @@
 """工具包：工具实现 + 工具定义（TOOLS schema）+ 工具调用分发器"""
 import asyncio
 import json
+import re
 
 from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
@@ -201,17 +202,62 @@ TOOL_FUNCTIONS = {
 }
 
 
+def _parse_tool_arguments(raw):
+    """解析工具调用参数 JSON，对 LLM 常见输出瑕疵做容错。
+
+    返回 (dict, None) 或 (None, error_msg)。解析失败时不再向上抛异常，
+    交由调用方以 tool 错误信息回传给模型自纠。
+    """
+    if isinstance(raw, dict):
+        return raw, None
+    if not isinstance(raw, str):
+        raw = raw or "{}"
+    text = raw.strip()
+    # 1) 直接解析
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError:
+        pass
+    # 2) 去除尾随逗号 / 多余逗号
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", text)
+    try:
+        return json.loads(cleaned), None
+    except json.JSONDecodeError:
+        pass
+    # 3) 截断场景：补全未闭合的 { [ 括号
+    opens = sum(1 for c in cleaned if c in "{[")
+    closes = sum(1 for c in cleaned if c in "}]")
+    if opens > closes:
+        try:
+            return json.loads(cleaned + "}" * (opens - closes)), None
+        except json.JSONDecodeError:
+            pass
+    return None, f"参数不是合法 JSON（已尝试容错修复仍失败）: {raw[:200]}"
+
+
 async def _execute_single_tool(tool_call):
-    """异步执行单个工具调用，返回 tool 结果消息（供并发执行）"""
+    """异步执行单个工具调用，返回 tool 结果消息（供并发执行）。
+
+    参数 JSON 解析失败不再中断整轮执行，而是以 tool 错误信息回传模型自纠。
+    """
+    # 先取工具名与调用 id（不依赖参数解析，确保总能产出关联结果）
     if hasattr(tool_call, 'function'):
         function_name = tool_call.function.name
-        arguments = json.loads(tool_call.function.arguments)
+        raw_args = tool_call.function.arguments
         call_id = tool_call.id
     else:
-        # 处理 dict 格式
         function_name = tool_call['function']['name']
-        arguments = json.loads(tool_call['function']['arguments'])
+        raw_args = tool_call['function']['arguments']
         call_id = tool_call['id']
+
+    arguments, err = _parse_tool_arguments(raw_args)
+    if err:
+        print(f"⚠️ 工具 {function_name} 参数解析失败: {err}")
+        return {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": f"Error: 工具 {function_name} 参数不是合法 JSON，无法执行 - {err}",
+        }
 
     print(f"🔧 执行工具: {function_name}")
     print(f"📥 参数: {json.dumps(arguments, ensure_ascii=False)}")
