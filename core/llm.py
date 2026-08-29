@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from . import db
 from . import config
 from .tools import TOOLS, process_tool_calls
+from .tools.ov_tools import openviking_load_context, wrap_recall_block, openviking_capture
 
 
 def to_responses_input(messages):
@@ -281,7 +282,7 @@ def build_assistant_msg(content, reasoning, tool_calls_list, output_items=None):
     return msg
 
 
-async def chat_completion_with_tools(client, messages, session_id=None):
+async def chat_completion_with_tools(client, messages, session_id=None, ov_session_id=None):
     """工具调用循环（协议无关，底层基于 Responses API 流式请求）：
 
       请求 1.1  输入[工具, 问题1]      → 输出 思维链1.1 + 工具调用1.1
@@ -331,6 +332,14 @@ async def chat_completion_with_tools(client, messages, session_id=None):
         messages.extend(tool_results)
         if session_id:
             db.append_messages(session_id, [assistant_msg] + tool_results)
+        if ov_session_id:
+            openviking_capture(ov_session_id, [assistant_msg] + tool_results)
+
+        # ---- 每步召回：工具结果回来后，基于完整批次重新检索相关记忆并注入 ----
+        # 对齐官方 pre-step recall：query 含工具结果，下一次模型调用即带上新线索
+        step_recall = openviking_load_context(messages)
+        if step_recall:
+            messages.append({"role": "user", "content": wrap_recall_block(step_recall)})
 
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
         print("\n" + "=" * 30)
@@ -347,15 +356,22 @@ async def chat_completion_with_tools(client, messages, session_id=None):
         }
         print("\n⚠️ 工具调用次数已达上限，强制基于已有结果给出最终回答")
         messages.append(force_msg)
+        step_recall = openviking_load_context(messages)
+        if step_recall:
+            messages.append({"role": "user", "content": wrap_recall_block(step_recall)})
         content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
         new_history_messages.append(force_msg)
         if session_id:
             db.append_messages(session_id, [force_msg, assistant_msg])
+        if ov_session_id:
+            openviking_capture(ov_session_id, [force_msg, assistant_msg])
 
     new_history_messages.append(assistant_msg)
     if session_id:
         db.append_messages(session_id, [assistant_msg])
+    if ov_session_id:
+        openviking_capture(ov_session_id, [assistant_msg])
 
     return content, reasoning, usage, assistant_msg, all_tool_results, new_history_messages

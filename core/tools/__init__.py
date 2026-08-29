@@ -11,6 +11,7 @@ from .ov_tools import (
     openviking_remember,
     openviking_read,
     openviking_load_context,
+    openviking_load_profile,
 )
 from .other_ov_tool import other_ov_tool
 
@@ -24,6 +25,7 @@ __all__ = [
     "openviking_remember",
     "openviking_read",
     "openviking_load_context",
+    "openviking_load_profile",
     "other_ov_tool",
 ]
 
