@@ -30,6 +30,9 @@ DEBUG_SEND_SEQ = os.environ.get('DEBUG_SEND_SEQ', '0') in ('1', 'true', 'True')
 OV_SCORE_THRESHOLD = float(os.environ.get('OV_SCORE_THRESHOLD', '0.35'))
 OV_SEARCH_LIMIT = int(os.environ.get('OV_SEARCH_LIMIT', '3'))
 OV_INJECT_LIMIT = int(os.environ.get('OV_INJECT_LIMIT', '5'))
+# 自动注入召回的相似度阈值（独立于搜索工具的 OV_SCORE_THRESHOLD）。
+# 默认 0.4：官方后端默认 0.3 杂音较多，自动注入走更高阈值以滤除低相关记忆。
+OV_INJECT_THRESHOLD = float(os.environ.get('OV_INJECT_THRESHOLD', '0.4'))
 
 # ===== OpenViking 官方结构对齐（可选）=====
 # 召回 peer 隔离：all=跨项目召回；actor=仅本 workspace 隔离召回

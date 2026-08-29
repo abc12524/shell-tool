@@ -374,7 +374,7 @@ def openviking_load_context(messages) -> str:
         query = build_recall_query(messages)
         if len(query) < config.OV_MIN_QUERY_LENGTH:
             return ""
-        result = _ov_post("/api/v1/search/search", _search_payload(query))
+        result = _ov_post("/api/v1/search/search", _search_payload(query, config.OV_INJECT_THRESHOLD))
         mems = _extract_memories(result)
         hits = mems[:config.OV_INJECT_LIMIT]
         if not hits:
