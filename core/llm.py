@@ -339,7 +339,12 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         # 对齐官方 pre-step recall：query 含工具结果，下一次模型调用即带上新线索
         step_recall = openviking_load_context(messages)
         if step_recall:
-            messages.append({"role": "user", "content": wrap_recall_block(step_recall)})
+            recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
+            messages.append(recall_msg)
+            if session_id:
+                db.append_messages(session_id, [recall_msg])
+            if ov_session_id:
+                openviking_capture(ov_session_id, [recall_msg])
 
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
         print("\n" + "=" * 30)
@@ -358,15 +363,20 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         messages.append(force_msg)
         step_recall = openviking_load_context(messages)
         if step_recall:
-            messages.append({"role": "user", "content": wrap_recall_block(step_recall)})
+            recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
+            messages.append(recall_msg)
+            if session_id:
+                db.append_messages(session_id, [recall_msg])
+            if ov_session_id:
+                openviking_capture(ov_session_id, [recall_msg])
         content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
         new_history_messages.append(force_msg)
         if session_id:
-            db.append_messages(session_id, [force_msg, assistant_msg])
+            db.append_messages(session_id, [assistant_msg])
         if ov_session_id:
-            openviking_capture(ov_session_id, [force_msg, assistant_msg])
+            openviking_capture(ov_session_id, [assistant_msg])
 
     new_history_messages.append(assistant_msg)
     if session_id:
