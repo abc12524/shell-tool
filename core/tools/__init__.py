@@ -9,6 +9,7 @@ from .system_tools import get_system_info, execute_system_command
 from .search_tools import baidu_search
 from .ov_tools import (
     openviking_search,
+    openviking_find,
     openviking_remember,
     openviking_read,
     openviking_load_context,
@@ -23,6 +24,7 @@ __all__ = [
     "execute_system_command",
     "baidu_search",
     "openviking_search",
+    "openviking_find",
     "openviking_remember",
     "openviking_read",
     "openviking_load_context",
@@ -88,7 +90,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "openviking_search",
-            "description": "在 OpenViking 外置记忆中语义搜索，查找之前保存的知识、偏好、项目信息等。当用户的问题涉及已知信息时先查记忆。可由你自行判断相似度阈值与返回条数。",
+            "description": "在 OpenViking 外置记忆中做上下文感知语义搜索（search 接口：结合会话语境提升召回），查找之前保存的知识、偏好、项目信息等。当用户的问题涉及已知信息时先查记忆。可由你自行判断相似度阈值与返回条数。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -100,13 +102,46 @@ TOOLS = [
                         "type": "number",
                         "minimum": 0,
                         "maximum": 1,
-                        "description": "相似度阈值（0~1），默认 0.35。阈值越高要求记忆与问题越相关"
+                        "description": "相似度阈值（0~1），默认 0.4。阈值越高要求记忆与问题越相关"
                     },
                     "limit": {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 10,
                         "description": "返回条数上限（0~10），默认 3"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "openviking_find",
+            "description": "在 OpenViking 外置记忆中做语义搜索（find 接口：纯向量相似度、无会话上下文、低延迟），查找之前保存的知识、偏好、项目信息等。当用户的问题涉及已知信息时先查记忆。可由你自行判断相似度阈值、返回条数与检索范围。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词，描述要查找什么内容"
+                    },
+                    "score_threshold": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "相似度阈值（0~1），默认 0.4。阈值越高要求记忆与问题越相关"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10,
+                        "description": "返回条数上限（0~10），默认 3"
+                    },
+                    "target_uri": {
+                        "type": "string",
+                        "description": "可选，限定检索范围的 Viking URI 前缀，如 viking://user/memories/（仅用户记忆）、viking://resources/my-project/（指定项目）。留空则在全部范围检索"
                     }
                 },
                 "required": ["query"]
@@ -196,6 +231,7 @@ TOOL_FUNCTIONS = {
     "execute_system_command": lambda args: execute_system_command(args.get('command', '')),
     "baidu_search": lambda args: baidu_search(args.get('mode', 'raw'), args.get('query', '')),
     "openviking_search": lambda args: openviking_search(args.get('query', ''), args.get('score_threshold'), args.get('limit')),
+    "openviking_find": lambda args: openviking_find(args.get('query', ''), args.get('score_threshold'), args.get('limit'), args.get('target_uri', '')),
     "openviking_read": lambda args: openviking_read(args.get('uri', '')),
     "openviking_remember": lambda args: openviking_remember(args.get('category', 'entities'), args.get('name', 'untitled'), args.get('content', '')),
     "other_ov_tool": lambda args: other_ov_tool(args.get('all', False), args.get('tool', ''), args.get('arguments')),

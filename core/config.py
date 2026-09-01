@@ -25,14 +25,14 @@ MAX_TOOL_ROUNDS = int(os.environ.get('MAX_TOOL_ROUNDS', '6'))
 DEBUG_SEND_SEQ = os.environ.get('DEBUG_SEND_SEQ', '0') in ('1', 'true', 'True')
 
 # ===== OpenViking 记忆检索 =====
-# 自动注入的相似度阈值与条数；openviking_search 工具默认值由此提供，
-# 但工具运行时由 LLM 自行传参判断（阈值收敛 0~1，条数收敛 0~10）
-OV_SCORE_THRESHOLD = float(os.environ.get('OV_SCORE_THRESHOLD', '0.35'))
+# search / find 两个记忆工具的默认阈值与条数；运行时 LLM 可自主传参覆盖。
+# search 接口（上下文感知）：默认阈值 0.4，默认返回 3 条
+OV_SEARCH_THRESHOLD = float(os.environ.get('OV_SEARCH_THRESHOLD', '0.4'))
 OV_SEARCH_LIMIT = int(os.environ.get('OV_SEARCH_LIMIT', '3'))
-OV_INJECT_LIMIT = int(os.environ.get('OV_INJECT_LIMIT', '5'))
-# 自动注入召回的相似度阈值（独立于搜索工具的 OV_SCORE_THRESHOLD）。
-# 默认 0.4：官方后端默认 0.3 杂音较多，自动注入走更高阈值以滤除低相关记忆。
-OV_INJECT_THRESHOLD = float(os.environ.get('OV_INJECT_THRESHOLD', '0.4'))
+# find 接口（纯向量语义搜索）：默认阈值 0.4，默认返回 3 条。
+# 自动注入（openviking_load_context）也使用 find 接口，故复用本组配置。
+OV_FIND_THRESHOLD = float(os.environ.get('OV_FIND_THRESHOLD', '0.4'))
+OV_FIND_LIMIT = int(os.environ.get('OV_FIND_LIMIT', '3'))
 
 # ===== OpenViking 官方结构对齐（可选）=====
 # 召回 peer 隔离：all=跨项目召回；actor=仅本 workspace 隔离召回

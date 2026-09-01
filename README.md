@@ -25,7 +25,7 @@ shell-tool/
 │   └── tools/
 │       ├── system_tools.py   # 系统信息 / 命令执行
 │       ├── search_tools.py   # 百度搜索（调用 scripts/qianfan.py）
-│       ├── ov_tools.py       # OpenViking 记忆工具（search/remember/read/...）
+│       ├── ov_tools.py       # OpenViking 记忆工具（search/find/remember/read/...）
 │       ├── other_ov_tool.py  # OpenViking 其他工具合集入口
 │       └── __init__.py       # 工具 schema 定义与调用分发器
 ├── scripts/
