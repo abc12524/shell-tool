@@ -22,8 +22,8 @@ MAX_TOOL_ROUNDS = int(os.environ.get('MAX_TOOL_ROUNDS', '6'))
 
 # ===== LLM 内置工具（服务端执行，非本地 function 工具）=====
 # DeepSeek Responses API 内置 web_search 工具的开关。
-# true=向模型提供内置联网搜索（默认）；false=关闭，模型不再触发服务端网页搜索。
-LLM_WEB_SEARCH = os.environ.get('LLM_WEB_SEARCH', 'true') in ('1', 'true', 'True', 'yes')
+# false=关闭，模型不再触发服务端网页搜索（默认）；true=向模型提供内置联网搜索。
+LLM_WEB_SEARCH = os.environ.get('LLM_WEB_SEARCH', 'false') in ('1', 'true', 'True', 'yes')
 
 # ===== 调试 =====
 # 打印每轮发送给 API 的消息序列 hash（role:md5），默认关闭
