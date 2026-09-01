@@ -20,6 +20,11 @@ DEEPSEEK_MODEL = os.environ.get('DEEPSEEK_MODEL', 'deepseek-v4-flash')
 # 若模型在最终轮仍请求工具，在预算内可再执行，超出则强制基于已有结果作答。
 MAX_TOOL_ROUNDS = int(os.environ.get('MAX_TOOL_ROUNDS', '6'))
 
+# ===== LLM 内置工具（服务端执行，非本地 function 工具）=====
+# DeepSeek Responses API 内置 web_search 工具的开关。
+# true=向模型提供内置联网搜索（默认）；false=关闭，模型不再触发服务端网页搜索。
+LLM_WEB_SEARCH = os.environ.get('LLM_WEB_SEARCH', 'true') in ('1', 'true', 'True', 'yes')
+
 # ===== 调试 =====
 # 打印每轮发送给 API 的消息序列 hash（role:md5），默认关闭
 DEBUG_SEND_SEQ = os.environ.get('DEBUG_SEND_SEQ', '0') in ('1', 'true', 'True')

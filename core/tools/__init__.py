@@ -16,6 +16,7 @@ from .ov_tools import (
     openviking_load_profile,
 )
 from .other_ov_tool import other_ov_tool
+from .. import config
 
 __all__ = [
     "TOOLS",
@@ -219,10 +220,13 @@ TOOLS = [
             }
         }
     },
-    {
-        "type": "web_search",
-    },
 ]
+
+
+# DeepSeek Responses API 内置 web 搜索工具（服务端自动执行，区别于本地的 baidu_search 等）。
+# 由 .env 的 LLM_WEB_SEARCH 控制开关（默认开启）；关闭后模型不再被提供该能力。
+if config.LLM_WEB_SEARCH:
+    TOOLS.append({"type": "web_search"})
 
 
 # 工具名 → 执行函数 映射

@@ -57,6 +57,7 @@ cp .env.example .env
 | `DEEPSEEK_BASE_URL` | DeepSeek API 地址（默认 `https://api.deepseek.com`） |
 | `DEEPSEEK_MODEL` | 模型名（默认 `deepseek-v4-flash`） |
 | `MAX_TOOL_ROUNDS` | 工具调用最大轮数（默认 6） |
+| `LLM_WEB_SEARCH` | LLM 内置联网搜索（DeepSeek Responses API 自带 web_search）开关：`true`=开启（默认），`false`=关闭 |
 | `DB_ONLINE` | 数据库开关：`true`=在线 MySQL，`false`=本地 SQLite（默认 true；MySQL 连接失败自动降级 SQLite） |
 | `SQLITE_DB_PATH` | 本地 SQLite 文件路径（默认 `data/shell_tool.db`） |
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | MySQL 会话存储 |
