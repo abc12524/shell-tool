@@ -89,6 +89,10 @@ python dp.py -n "帮我写一个 Python 脚本"
 # 指定历史会话继续
 python dp.py -s 20260811_101500 "继续上一个话题"
 
+# 覆盖并写回 .env 的密钥 / 模型（本次及后续运行均生效）
+python dp.py -k sk-xxxxxxxx
+python dp.py -m deepseek-v4-pro "换个模型回答"
+
 # 查看帮助
 python dp.py
 ```
@@ -113,6 +117,14 @@ curl -X POST http://localhost:8000/chat \
 curl -N -X POST http://localhost:8000/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"question": "解释一下什么是量子计算", "new": true}'
+```
+
+请求体可选字段 `key` / `model`：传入即覆盖并写回服务端 `.env` 的 `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL`，对本次及后续请求均生效（等价于 CLI 的 `-k` / `-m`）。
+
+```bash
+curl -N -X POST http://localhost:8000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "换个模型回答", "model": "deepseek-v4-pro"}'
 ```
 
 **健康检查**

@@ -38,6 +38,10 @@ def build_args(data):
     args = []
     if data.get("new"):
         args.append("-n")
+    if data.get("key"):
+        args += ["-k", str(data["key"])]
+    if data.get("model"):
+        args += ["-m", str(data["model"])]
     args += data.get("args", [])
     return args
 

@@ -10,9 +10,10 @@
   以 ':' 开头的注释行（含 ": heartbeat"）忽略
 
 用法：
-  dp.py [-H 主机] [-P 端口] [-n] [-t 超时秒] <问题...>
+  dp.py [-H 主机] [-P 端口] [-n] [-t 超时秒] [-k KEY] [-m MODEL] <问题...>
   # 例：dp.py -H 192.168.30.181 "今天北京天气怎么样？"
   #      dp.py -n "帮我写个脚本"
+  #      dp.py -m deepseek-v4-pro -k sk-xxx "问题"   # 覆盖服务端 .env 的模型/密钥
 环境变量 DP_HOST / DP_PORT / DP_TIMEOUT 可覆盖默认值。
 """
 import argparse
@@ -101,6 +102,8 @@ def main():
     parser.add_argument("-P", "--port", default=DEFAULT_PORT, help="服务端端口")
     parser.add_argument("-n", "--new", action="store_true", help="新开对话")
     parser.add_argument("-t", "--timeout", type=int, default=DEFAULT_TIMEOUT, help="请求超时（秒）")
+    parser.add_argument("-k", "--key", help="覆盖服务端 .env 的 DeepSeek API Key")
+    parser.add_argument("-m", "--model", help="覆盖服务端 .env 的模型名")
     parser.add_argument("question", nargs="+", help="要问的问题")
     args = parser.parse_args()
 
@@ -109,6 +112,10 @@ def main():
     payload = {"question": question}
     if args.new:
         payload["new"] = True
+    if args.key:
+        payload["key"] = args.key
+    if args.model:
+        payload["model"] = args.model
 
     req = Request(
         url,

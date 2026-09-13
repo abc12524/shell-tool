@@ -27,14 +27,18 @@ USAGE = """使用方法：python dp.py [选项] [问题]
   直接加问题   → 默认同一对话（复用最近的活跃会话）
   -n, --new    → 终结当前对话，并新开一个对话
   -s, --session <id> → 指定会话继续对话（可指定已终结的历史会话）
+  -k, --key <key>    → 覆盖 DEEPSEEK_API_KEY，并写回 .env
+  -m, --model <name> → 覆盖 DEEPSEEK_MODEL，并写回 .env
   不加参数     → 查看此帮助
 """
 
 
 def parse_args(argv):
-    """解析命令行参数，返回 (new_flag, session_id, question)"""
+    """解析命令行参数，返回 (new_flag, session_id, question, api_key, model)"""
     new_flag = False
     sid = None
+    api_key = None
+    model = None
     question_parts = []
     i = 1
     while i < len(argv):
@@ -49,10 +53,24 @@ def parse_args(argv):
             else:
                 print("⚠️  -s/--session 需要指定 session_id")
                 sys.exit(1)
+        elif a in ('-k', '--key'):
+            if i + 1 < len(argv) and argv[i + 1].strip():
+                api_key = argv[i + 1]
+                i += 2
+            else:
+                print("⚠️  -k/--key 需要指定 API Key")
+                sys.exit(1)
+        elif a in ('-m', '--model'):
+            if i + 1 < len(argv) and argv[i + 1].strip():
+                model = argv[i + 1]
+                i += 2
+            else:
+                print("⚠️  -m/--model 需要指定模型名")
+                sys.exit(1)
         else:
             question_parts.append(a)
             i += 1
-    return new_flag, sid, ' '.join(question_parts)
+    return new_flag, sid, ' '.join(question_parts), api_key, model
 
 
 # 记录最近一次使用的后端，用于检测 mysql↔sqlite 切换（切换时强制新开 session）
@@ -161,8 +179,18 @@ def main():
 
 
 async def _async_main():
-    new_flag, sid, question = parse_args(sys.argv)
+    new_flag, sid, question, api_key, model = parse_args(sys.argv)
     asked_at = datetime.now(timezone.utc)
+
+    # -k/-m：覆盖并写回 .env，本次进程与后续进程（含 8000 端口调用）均生效
+    updates = {}
+    if api_key:
+        updates['DEEPSEEK_API_KEY'] = api_key
+    if model:
+        updates['DEEPSEEK_MODEL'] = model
+    if updates:
+        config.update_env(**updates)
+        print(f"⚙️  已更新 .env：{'、'.join(updates)}")
 
     if not question:
         print(USAGE)

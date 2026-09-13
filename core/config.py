@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """全局配置：环境变量加载 + 常量"""
 import os
-from dotenv import load_dotenv
+import shutil
 
-load_dotenv()
+from dotenv import load_dotenv
 
 # core/ 目录（本文件所在目录）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # 项目根目录（core 的上一级，用于定位 scripts/ 等外部资源）
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+# .env 文件路径（-k/-m 等运行时覆盖写回此处）；缺失时从模板复制
+ENV_PATH = os.path.join(PROJECT_ROOT, '.env')
+ENV_EXAMPLE_PATH = os.path.join(PROJECT_ROOT, '.env.example')
+if not os.path.exists(ENV_PATH) and os.path.exists(ENV_EXAMPLE_PATH):
+    shutil.copyfile(ENV_EXAMPLE_PATH, ENV_PATH)
+
+load_dotenv(ENV_PATH)
 
 # ===== LLM =====
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
@@ -78,3 +85,34 @@ DB_CONFIG = {
 
 # 是否已配置 MySQL 连接信息（host/user/database 任一为空视为未配置）
 DB_CONFIGURED = bool(DB_CONFIG['host'] and DB_CONFIG['user'] and DB_CONFIG['database'])
+
+
+def update_env(**updates):
+    """把配置写回 .env（已有则替换该行，否则追加），并同步 os.environ 与内存配置。
+
+    供 CLI -k/-m 使用：不仅本次进程立即生效，后续进程（含 8000 端口调用）也读取新值。
+    """
+    lines = []
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, encoding='utf-8') as f:
+            lines = f.read().splitlines()
+
+    pending = {k: str(v) for k, v in updates.items()}
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or '=' not in line:
+            continue
+        key = line.split('=', 1)[0].strip()
+        if key in pending:
+            lines[i] = f"{key}={pending.pop(key)}"
+
+    for key, value in pending.items():
+        lines.append(f"{key}={value}")
+
+    with open(ENV_PATH, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+
+    for key, value in updates.items():
+        os.environ[key] = str(value)
+        if key in globals():
+            globals()[key] = value
