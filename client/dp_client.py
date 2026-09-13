@@ -22,12 +22,43 @@ import sys
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
+
+console = Console(highlight=False)
+
+
+class LiveMarkdown:
+    """流式 Markdown 渲染器"""
+
+    def __init__(self):
+        self._buf = []
+        self._live = None
+
+    def start(self):
+        self._buf.clear()
+        self._live = Live(console=console, refresh_per_second=12, transient=False)
+        self._live.start()
+        return self
+
+    def feed(self, delta: str):
+        if delta:
+            self._buf.append(delta)
+            self._live.update(Markdown("".join(self._buf)))
+
+    def finish(self):
+        if self._live:
+            self._live.stop()
+            self._live = None
+        return "".join(self._buf)
+
 DEFAULT_HOST = os.environ.get("DP_HOST", "192.168.30.181")
 DEFAULT_PORT = os.environ.get("DP_PORT", "8000")
 DEFAULT_TIMEOUT = int(os.environ.get("DP_TIMEOUT", "300"))
 
 
-def _handle_event(event_text):
+def _handle_event(event_text, live_md):
     """处理单个 SSE event 块（已去掉末尾空行）。
 
     返回:
@@ -54,10 +85,9 @@ def _handle_event(event_text):
 
     etype = evt.get("type")
     if etype == "content" or etype == "reasoning":
-        sys.stdout.write(evt.get("content", ""))
-        sys.stdout.flush()
+        live_md.feed(evt.get("content", ""))
     elif etype == "error":
-        sys.stderr.write(f"\n[错误] {evt.get('error', '')}\n")
+        console.print(f"\n[bold red][错误][/bold red] {evt.get('error', '')}")
         return 2
     elif etype == "done":
         return 1
@@ -90,6 +120,7 @@ def main():
     print(f"连接到: {url}", file=sys.stderr)
     exit_code = 0
     event_lines = []  # 当前事件已收集的行（SSE 以空行分隔事件）
+    live_md = LiveMarkdown().start()
 
     try:
         with urlopen(req, timeout=args.timeout) as resp:
@@ -100,7 +131,7 @@ def main():
                 if line == "":
                     # 空行 = 事件边界
                     if event_lines:
-                        rc = _handle_event("\n".join(event_lines))
+                        rc = _handle_event("\n".join(event_lines), live_md)
                         event_lines = []
                         if rc == 2:
                             exit_code = 1
@@ -114,21 +145,24 @@ def main():
                 event_lines.append(line)
             # 连接关闭：处理可能残留的最后一个事件
             if event_lines:
-                rc = _handle_event("\n".join(event_lines))
+                rc = _handle_event("\n".join(event_lines), live_md)
                 if rc == 2:
                     exit_code = 1
     except HTTPError as e:
+        live_md.finish()
         body = e.read().decode("utf-8", errors="replace")
-        sys.stderr.write(f"HTTP 错误 {e.code}: {body}\n")
+        console.print(f"[bold red]HTTP 错误 {e.code}:[/bold red] {body}")
         sys.exit(1)
     except URLError as e:
-        sys.stderr.write(f"连接失败: {e.reason}\n")
+        live_md.finish()
+        console.print(f"[bold red]连接失败:[/bold red] {e.reason}")
         sys.exit(1)
     except Exception as e:
-        sys.stderr.write(f"请求异常: {str(e)}\n")
+        live_md.finish()
+        console.print(f"[bold red]请求异常:[/bold red] {str(e)}")
         sys.exit(1)
 
-    print()
+    live_md.finish()
     sys.exit(exit_code)
 
 

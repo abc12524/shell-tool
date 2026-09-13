@@ -3,3 +3,4 @@ requests
 pymysql
 flask
 python-dotenv
+rich>=13.0

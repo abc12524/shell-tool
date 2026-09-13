@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from . import db
 from . import config
+from .console import console, LiveMarkdown, LiveReasoning, render_table
 from .tools import TOOLS, process_tool_calls
 from .tools.ov_tools import openviking_load_context, wrap_recall_block, openviking_capture
 
@@ -142,6 +143,9 @@ async def stream_responses_api(client, messages):
     # output_index → 累积中的 function_call
     fc_by_idx = {}
 
+    live_reasoning = LiveReasoning().start()
+    live_md = None  # 思考结束后再启动
+
     async for chunk in stream:
         ctype = getattr(chunk, 'type', '')
 
@@ -158,12 +162,12 @@ async def stream_responses_api(client, messages):
                 }
             elif getattr(item, 'type', None) == 'web_search_call':
                 if not search_header_shown:
-                    print("\n🔎 服务端网页搜索：")
+                    console.print("\n🔎 服务端网页搜索：", style="bold cyan")
                     search_header_shown = True
-                print(f"  - 搜索调用 {getattr(item, 'id', '')} 已发起")
+                console.print(f"  - 搜索调用 {getattr(item, 'id', '')} 已发起", style="cyan")
 
         elif ctype.startswith('response.web_search_call.'):
-            print(f"  - 搜索状态: {ctype.split('.')[-1]}")
+            console.print(f"  - 搜索状态: {ctype.split('.')[-1]}", style="cyan")
 
         elif ctype == 'response.function_call_arguments.delta':
             idx = getattr(chunk, 'output_index', None)
@@ -173,26 +177,26 @@ async def stream_responses_api(client, messages):
         elif ctype == 'response.reasoning_text.delta':
             delta = getattr(chunk, 'delta', '') or ''
             if delta:
-                if not reasoning:
-                    print("\n🤔 思考过程：")
-                print(delta, end="", flush=True)
                 reasoning += delta
+                live_reasoning.feed(delta)
 
         elif ctype == 'response.output_text.delta':
             delta = getattr(chunk, 'delta', '') or ''
             if delta:
-                if reasoning and not content:
-                    print("\n" + "=" * 30)
-                    print("💬 最终回答：")
-                print(delta, end="", flush=True)
                 content += delta
+                if live_md is None:
+                    # 思考结束，切换到 Markdown 渲染
+                    live_reasoning.finish()
+                    if reasoning:
+                        console.rule("[dim]🤔 思考过程[/dim]")
+                        console.print()
+                    live_md = LiveMarkdown().start()
+                live_md.feed(delta)
 
         elif ctype == 'response.completed':
             resp = getattr(chunk, 'response', None)
             if resp is not None:
                 usage = _normalize_usage(getattr(resp, 'usage', None))
-                # 服务端完整 output 序列仅在最终 response.completed 中给出，
-                # 从这里按原始顺序提取，供下一轮原样回传（reasoning/web_search_call 必须保持顺序）
                 output_items = _extract_output_items(getattr(resp, 'output', None))
 
         elif ctype == 'response.failed':
@@ -204,7 +208,11 @@ async def stream_responses_api(client, messages):
                     err = getattr(e, 'message', '') or str(e)
             raise RuntimeError(f"Responses API 请求失败: {err}")
 
-    print()
+    # 流式结束，关闭 Live 渲染
+    if live_md is not None:
+        live_md.finish()
+    else:
+        live_reasoning.finish()
 
     tool_calls = []
     for idx in sorted(k for k in fc_by_idx if k is not None):
@@ -319,7 +327,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
             break
 
         print("\n" + "=" * 30)
-        print(f"🔧 执行工具 (第{tool_rounds}轮): {len(tool_calls)} 个本地调用 / {len(web_search_calls)} 个服务端搜索")
+        console.print(f"🔧 执行工具 (第{tool_rounds}轮): {len(tool_calls)} 个本地调用 / {len(web_search_calls)} 个服务端搜索", style="bold yellow")
 
         # 一次并发执行本轮全部 function 调用（异步无同步屏障），结果一次性回传；
         # web_search_call 由服务端自动执行，仅随 assistant 消息原样回传供恢复结果
@@ -348,7 +356,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
 
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
         print("\n" + "=" * 30)
-        print("🤔 继续推理...")
+        console.print("🤔 继续推理...", style="dim italic")
         content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
@@ -359,7 +367,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
             "role": "user",
             "content": "已达到工具调用次数上限，请不要再调用工具，直接基于已有信息给出最终回答。"
         }
-        print("\n⚠️ 工具调用次数已达上限，强制基于已有结果给出最终回答")
+        console.print("\n⚠️  工具调用次数已达上限，强制基于已有结果给出最终回答", style="bold red")
         messages.append(force_msg)
         step_recall = openviking_load_context(messages, session_id=session_id)
         if step_recall:

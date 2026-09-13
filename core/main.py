@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from . import config
 from . import db
 from . import llm
+from .console import console, render_table
 from .tools import get_system_info
 from .tools.ov_tools import (
     openviking_load_context,
@@ -127,16 +128,18 @@ def build_system_prompt(now_str=None):
 
 
 def print_usage_stats(usage):
-    """打印 token 统计"""
+    """打印 token 统计（Rich 表格）"""
     if not usage:
         return
-    print(f"\n📊 Token 消耗统计：")
-    print(f"   - 输入: {usage.prompt_tokens}")
-    print(f"   - 输出: {usage.completion_tokens}")
-    print(f"   - 推理 token: {getattr(usage, 'reasoning_tokens', 0)}")
-    print(f"   - 缓存命中 token: {getattr(usage, 'prompt_cache_hit_tokens', 0)}")
-    print(f"   - 缓存未命中 token: {getattr(usage, 'prompt_cache_miss_tokens', 0)}")
-    print(f"   - 总计: {usage.total_tokens}")
+    rows = [
+        ("输入", usage.prompt_tokens),
+        ("输出", usage.completion_tokens),
+        ("推理 token", getattr(usage, 'reasoning_tokens', 0)),
+        ("缓存命中", getattr(usage, 'prompt_cache_hit_tokens', 0)),
+        ("缓存未命中", getattr(usage, 'prompt_cache_miss_tokens', 0)),
+        ("总计", usage.total_tokens),
+    ]
+    render_table("📊 Token 消耗统计", rows)
 
 
 def main():
