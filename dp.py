@@ -1,4 +1,4 @@
-#!/home/hollow/.venv/bin/python3
+#!/root/.venv/bin/python3
 """启动入口：调用 core.main 的 CLI 主流程"""
 from core.main import main
 
