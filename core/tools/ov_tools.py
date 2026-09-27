@@ -95,6 +95,21 @@ def _ov_post(path, payload, timeout=15):
         return json.loads(error(f"OpenViking 请求失败 - {str(e)}", code="transport"))
 
 
+def _ov_delete(path, params=None, timeout=15):
+    """OpenViking DELETE 请求；失败返回错误信封 dict（不抛异常）"""
+    try:
+        r = requests.delete(f"{_ov_base()}{path}", headers=_ov_headers(),
+                            params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except requests.Timeout:
+        return json.loads(error("OpenViking 请求超时", code="timeout"))
+    except requests.HTTPError as e:
+        return json.loads(error(f"OpenViking HTTP 错误 - {e}", code="http"))
+    except Exception as e:
+        return json.loads(error(f"OpenViking 请求失败 - {str(e)}", code="transport"))
+
+
 # ============= 官方结构对齐：召回/注入辅助 =============
 RECALL_MARKER = "## 📖 相关记忆"
 PROFILE_MARKER = '<openviking-context source="profile">'
@@ -443,6 +458,26 @@ def openviking_write_file(uri: str, content: str, mode: str = "replace") -> str:
         return passthrough(result)
     except Exception as e:
         return error(f"写入失败 - {str(e)}", code="internal")
+
+
+def openviking_forget(uri: str, recursive: bool = False) -> str:
+    """从 OpenViking 删除（遗忘）文件或目录。
+
+    对齐 MCP forget：recursive=True 时递归删除目录及其所有子项。
+    注意：此操作不可撤销。
+    """
+    if not uri or not uri.strip():
+        return error("缺少 uri 参数，请提供要删除的文件/目录 URI", code="bad_request")
+    try:
+        params = {"uri": uri}
+        if recursive:
+            params["recursive"] = "true"
+        result = _ov_delete("/api/v1/fs", params=params)
+        if is_error(result):
+            return json.dumps(result, ensure_ascii=False)
+        return passthrough(result)
+    except Exception as e:
+        return error(f"删除失败 - {str(e)}", code="internal")
 
 
 # 客户端跨步/跨轮去重：本 session 已注入过的 URI 不再重复注入。

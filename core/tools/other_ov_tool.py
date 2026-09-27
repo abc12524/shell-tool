@@ -13,6 +13,7 @@ from .envelope import ok, error, is_error
 from .ov_tools import (
     openviking_list_dir,
     openviking_write_file,
+    openviking_forget,
     openviking_create_session,
     openviking_add_message,
     openviking_add_messages_batch,
@@ -25,6 +26,7 @@ from .ov_tools import (
 OTHER_OV_TOOLS = {
     "openviking_list_dir": "列出 OpenViking 指定目录下的所有文件和子目录，支持递归",
     "openviking_write_file": "写入/追加内容到 OpenViking 记忆文件（create/replace/append 三种模式）",
+    "openviking_forget": "删除（遗忘）OpenViking 记忆文件或目录，支持递归删除目录",
     "openviking_create_session": "创建新的对话 Session，用于保存一段完整对话历史，返回 session_id",
     "openviking_add_message": "向 Session 添加单条消息（user 或 assistant）",
     "openviking_add_messages_batch": "批量向 Session 添加多条消息（一次最多 100 条）",
@@ -49,6 +51,14 @@ OTHER_OV_USAGES = {
         "  content (string) - 要写入的内容（Markdown 格式）\n"
         "  mode (string) - create=创建新文件, replace=覆盖已有, append=追加到末尾\n"
         "示例: {\"uri\": \".../memories/preferences/language.md\", \"content\": \"# 语言\", \"mode\": \"create\"}"
+    ),
+    "openviking_forget": (
+        "删除（遗忘）OpenViking 记忆中的文件或目录。注意：此操作不可撤销！\n"
+        "必填参数:\n"
+        "  uri (string) - 要删除的文件/目录 URI\n"
+        "可选参数:\n"
+        "  recursive (boolean) - 是否递归删除目录及其所有子项，默认 false。删除非空目录时必须设为 true\n"
+        "示例: {\"uri\": \".../memories/preferences/language.md\"}"
     ),
     "openviking_create_session": (
         "创建新的对话 Session，返回 session_id。\n"
@@ -93,6 +103,7 @@ OTHER_OV_USAGES = {
 TOOL_HANDLERS = {
     "openviking_list_dir": lambda a: openviking_list_dir(a.get('uri', ''), a.get('recursive', False)),
     "openviking_write_file": lambda a: openviking_write_file(a.get('uri', ''), a.get('content', ''), a.get('mode', 'replace')),
+    "openviking_forget": lambda a: openviking_forget(a.get('uri', ''), a.get('recursive', False)),
     "openviking_create_session": lambda a: openviking_create_session(a.get('session_id', '')),
     "openviking_add_message": lambda a: openviking_add_message(a.get('session_id', ''), a.get('role', 'user'), a.get('content', ''), a.get('peer_id', '')),
     "openviking_add_messages_batch": lambda a: openviking_add_messages_batch(a.get('session_id', ''), a.get('messages', [])),

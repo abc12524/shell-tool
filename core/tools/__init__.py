@@ -199,7 +199,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "other_ov_tool",
-            "description": "OpenViking 其他工具合集（除 search/remember/read 外），含 8 个子工具：list_dir/write_file/session 系列。all=true 列出所有工具及说明；tool=子工具名 查看使用方式；tool+arguments 实际执行子工具。",
+            "description": "OpenViking 其他工具合集（除 search/remember/read 外），含 9 个子工具：list_dir/write_file/forget/session 系列。all=true 列出所有工具及说明；tool=子工具名 查看使用方式；tool+arguments 实际执行子工具。",
             "parameters": {
                 "type": "object",
                 "properties": {
