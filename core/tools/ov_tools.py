@@ -638,7 +638,7 @@ def _to_ov_messages(messages):
     - 跳过自动注入的召回/profile 块（避免记忆回声）
     - assistant 轮可由 OV_CAPTURE_ASSISTANT_TURNS 关闭
     - 过滤 ack/斜杠命令/纯标点/过短 等噪音
-    - 工具结果转 user 并带前缀，且绕过噪音过滤（官方 tool 摘要不被丢弃）
+    - 工具结果转 assistant（不带前缀）正常入库，且绕过噪音过滤（官方 tool 摘要不被丢弃）
     - 超长内容按 OV_CAPTURE_MAX_LENGTH / 工具按 OV_CAPTURE_TOOL_MAX_CHARS 截断
     """
     out = []
@@ -659,9 +659,7 @@ def _to_ov_messages(messages):
             content = content[:config.OV_CAPTURE_TOOL_MAX_CHARS]
             if not content.strip():
                 continue
-            name = m.get('name') or ''
-            text = f"[工具结果 {name}] {content}" if name else f"[工具结果] {content}"
-            out.append({"role": "user", "content": text})
+            out.append({"role": "assistant", "content": content})
             continue
 
         if role == 'assistant' and not config.OV_CAPTURE_ASSISTANT_TURNS:
