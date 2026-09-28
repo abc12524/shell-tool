@@ -631,20 +631,97 @@ def _should_capture(text, role):
     return True
 
 
-def _to_ov_messages(messages):
-    """把聊天消息转成 OV session 的 {role,content} 列表。
+def _tool_call_fields(tc):
+    """从 tool_call（dict 或 SDK 对象）提取 (id, name, arguments)。"""
+    if isinstance(tc, dict):
+        fn = tc.get('function') or {}
+        return tc.get('id'), fn.get('name'), fn.get('arguments')
+    fn = getattr(tc, 'function', None)
+    return (getattr(tc, 'id', None),
+            getattr(fn, 'name', None),
+            getattr(fn, 'arguments', None))
 
-    对齐官方 openviking 插件的选择逻辑：
+
+def _tool_input_value(raw):
+    """把工具参数规范成官方 tool_input：对象透传，JSON 串解析，其余包成 {value}。"""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, list):
+        return {"value": raw}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        parsed = str(raw)
+    if isinstance(parsed, dict):
+        return parsed
+    return {"value": parsed}
+
+
+def _drop_none(part):
+    """丢掉值为 None 的键，对齐官方 `field || undefined` 的序列化结果。"""
+    cleaned = {k: v for k, v in part.items() if v is not None}
+    return cleaned or None
+
+
+def _tool_call_part(tc):
+    """构造官方 tool 部件（调用侧）：type=tool, tool_status=running, tool_input。"""
+    tid, name, args = _tool_call_fields(tc)
+    part = {
+        "type": "tool",
+        "tool_id": tid or None,
+        "tool_name": name or None,
+        "tool_status": "running",
+    }
+    value = _tool_input_value(args)
+    if value is not None:
+        part["tool_input"] = value
+    return _drop_none(part)
+
+
+def _tool_result_status(content):
+    return "error" if content.lstrip().startswith("Error:") else "completed"
+
+
+def _tool_result_part(content, tool_id, tool_name):
+    """构造官方 tool 部件（结果侧）：type=tool, tool_status, tool_output。"""
+    return _drop_none({
+        "type": "tool",
+        "tool_id": tool_id or None,
+        "tool_name": tool_name or None,
+        "tool_status": _tool_result_status(content),
+        "tool_output": content,
+    })
+
+
+def _to_ov_messages(messages):
+    """把聊天消息转成 OV session 批次消息（对齐官方 opencode 插件 upload 结构）。
+
+    对齐官方 openviking 插件 capture-utils / buildCapturePayload：
+    - 纯文本轮 → {"role", "content": text}
+    - 含工具调用的轮 → {"role", "parts": [text?, tool...]}，工具用结构化部件：
+        {"type":"tool", "tool_id", "tool_name", "tool_status",
+         "tool_input"（调用时）/ "tool_output"（结果时）}
+      工具调用与结果按 tool_id 合并为同一部件（与官方一致：一轮内 input+output 同体），
+      结果归到 assistant 轮正常进入对话列表，不再拼 "[工具结果]" 前缀。
     - 跳过自动注入的召回/profile 块（避免记忆回声）
-    - assistant 轮可由 OV_CAPTURE_ASSISTANT_TURNS 关闭
-    - 过滤 ack/斜杠命令/纯标点/过短 等噪音
-    - 工具结果转 assistant（不带前缀）正常入库，且绕过噪音过滤（官方 tool 摘要不被丢弃）
-    - 超长内容按 OV_CAPTURE_MAX_LENGTH / 工具按 OV_CAPTURE_TOOL_MAX_CHARS 截断
+    - assistant 轮（含工具轮）可由 OV_CAPTURE_ASSISTANT_TURNS 关闭
+    - 过滤 ack/斜杠命令/纯标点/过短 等噪音（仅作用于文本，工具部件不受影响）
+    - 超长文本按 OV_CAPTURE_MAX_LENGTH / 工具按 OV_CAPTURE_TOOL_MAX_CHARS 截断
     """
-    out = []
-    for m in (messages or []):
-        if not isinstance(m, dict):
-            continue
+    messages = [m for m in (messages or []) if isinstance(m, dict)]
+    # 收集 tool_id→name，供只有 tool_call_id 的结果消息补名（结果与调用不同批时兜底）
+    tool_names = {}
+    for m in messages:
+        for tc in (m.get('tool_calls') or []):
+            tid, name, _ = _tool_call_fields(tc)
+            if tid and name:
+                tool_names[tid] = name
+
+    out = []            # 已产出的 OV 消息（按对话顺序）
+    index = {}          # tool_id → 已产出的 tool 部件，用于合并结果输出
+    for m in messages:
         role = m.get('role')
         content = m.get('content') or ''
         if isinstance(content, list):
@@ -655,21 +732,52 @@ def _to_ov_messages(messages):
         if RECALL_MARKER in content or PROFILE_MARKER in content:
             continue
 
+        if role == 'assistant':
+            if not config.OV_CAPTURE_ASSISTANT_TURNS:
+                continue
+            text = content[:config.OV_CAPTURE_MAX_LENGTH]
+            keep_text = bool(text.strip()) and _should_capture(text, 'assistant')
+            tool_parts = []
+            for tc in (m.get('tool_calls') or []):
+                part = _tool_call_part(tc)
+                if not part:
+                    continue
+                tool_parts.append(part)
+                tid = part.get('tool_id')
+                if tid:
+                    index[tid] = part
+            if tool_parts:
+                # 含工具轮：parts 结构（文本部件 + tool 部件），对齐官方 buildCapturePayload
+                parts = ([{"type": "text", "text": text}] if keep_text else []) + tool_parts
+                out.append({"role": "assistant", "parts": parts})
+            elif keep_text:
+                out.append({"role": "assistant", "content": text})
+            continue
+
         if role == 'tool':
+            if not config.OV_CAPTURE_ASSISTANT_TURNS:
+                continue
             content = content[:config.OV_CAPTURE_TOOL_MAX_CHARS]
             if not content.strip():
                 continue
-            out.append({"role": "assistant", "content": content})
+            tid = m.get('tool_call_id') or ''
+            part = index.get(tid) if tid else None
+            if part is not None:
+                # 合并进同一轮已产出的 tool 部件：补全输出与终态
+                part['tool_status'] = _tool_result_status(content)
+                part['tool_output'] = content
+                if not part.get('tool_name') and (tool_names.get(tid) or m.get('name')):
+                    part['tool_name'] = tool_names.get(tid) or m.get('name')
+            else:
+                part = _tool_result_part(content, tid, m.get('name') or tool_names.get(tid) or '')
+                out.append({"role": "assistant", "parts": [part]})
             continue
 
-        if role == 'assistant' and not config.OV_CAPTURE_ASSISTANT_TURNS:
-            continue
-
-        content = content[:config.OV_CAPTURE_MAX_LENGTH]
-        if not _should_capture(content, role):
-            continue
-        ov_role = 'assistant' if role == 'assistant' else 'user'
-        out.append({"role": ov_role, "content": content})
+        if role == 'user':
+            content = content[:config.OV_CAPTURE_MAX_LENGTH]
+            if not _should_capture(content, role):
+                continue
+            out.append({"role": "user", "content": content})
     return out
 
 

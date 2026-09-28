@@ -62,7 +62,8 @@ OV_AUTO_CAPTURE = os.environ.get('OV_AUTO_CAPTURE', 'false') in ('1', 'true', 'T
 # 自动捕获时的选择策略（对齐官方 openviking 插件）
 OV_CAPTURE_ASSISTANT_TURNS = os.environ.get('OV_CAPTURE_ASSISTANT_TURNS', 'true') in ('1', 'true', 'True', 'yes')
 OV_CAPTURE_MAX_LENGTH = int(os.environ.get('OV_CAPTURE_MAX_LENGTH', '24000') or '24000')
-OV_CAPTURE_TOOL_MAX_CHARS = int(os.environ.get('OV_CAPTURE_TOOL_MAX_CHARS', '2000') or '2000')
+# 工具输出按原文上传，服务端 tool_output_externalization 负责截断（阈值默认 20000）
+OV_CAPTURE_TOOL_MAX_CHARS = int(os.environ.get('OV_CAPTURE_TOOL_MAX_CHARS', '1000000') or '1000000')
 # 跨轮去重轮数（对齐官方 dedup_turns）：最近 N 轮已注入过的记忆 URI 不再召回，避免同一份记忆反复注入刷屏；0=关闭
 OV_RECALL_DEDUP_TURNS = int(os.environ.get('OV_RECALL_DEDUP_TURNS', '5'))
 
