@@ -290,6 +290,14 @@ def build_assistant_msg(content, reasoning, tool_calls_list, output_items=None):
     return msg
 
 
+def _persist(session_id, ov_session_id, msgs):
+    """统一持久化出口：写本地库 + 同步 OV 会话，保证每条消息只落一次。"""
+    if session_id:
+        db.append_messages(session_id, msgs)
+    if ov_session_id:
+        openviking_capture(ov_session_id, msgs)
+
+
 async def chat_completion_with_tools(client, messages, session_id=None, ov_session_id=None):
     """工具调用循环（协议无关，底层基于 Responses API 流式请求）：
 
@@ -310,8 +318,9 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
     web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
     assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
 
-    # 无工具调用 → 直接返回最终回答
+    # 无工具调用 → 直接返回最终回答（先落库，避免简单问答的回复丢失）
     if not tool_calls and not web_search_calls:
+        _persist(session_id, ov_session_id, [assistant_msg])
         return content, reasoning, usage, assistant_msg, [], [assistant_msg]
 
     all_tool_results = []
@@ -338,10 +347,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         new_history_messages.extend(tool_results)
         messages.append(assistant_msg)
         messages.extend(tool_results)
-        if session_id:
-            db.append_messages(session_id, [assistant_msg] + tool_results)
-        if ov_session_id:
-            openviking_capture(ov_session_id, [assistant_msg] + tool_results)
+        _persist(session_id, ov_session_id, [assistant_msg] + tool_results)
 
         # ---- 每步召回：工具结果回来后，基于完整批次重新检索相关记忆并注入 ----
         # 对齐官方 pre-step recall：query 含工具结果，下一次模型调用即带上新线索
@@ -349,10 +355,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         if step_recall:
             recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
             messages.append(recall_msg)
-            if session_id:
-                db.append_messages(session_id, [recall_msg])
-            if ov_session_id:
-                openviking_capture(ov_session_id, [recall_msg])
+            _persist(session_id, ov_session_id, [recall_msg])
 
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
         print("\n" + "=" * 30)
@@ -373,23 +376,13 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         if step_recall:
             recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
             messages.append(recall_msg)
-            if session_id:
-                db.append_messages(session_id, [recall_msg])
-            if ov_session_id:
-                openviking_capture(ov_session_id, [recall_msg])
+            _persist(session_id, ov_session_id, [recall_msg])
         content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
         new_history_messages.append(force_msg)
-        if session_id:
-            db.append_messages(session_id, [assistant_msg])
-        if ov_session_id:
-            openviking_capture(ov_session_id, [assistant_msg])
 
     new_history_messages.append(assistant_msg)
-    if session_id:
-        db.append_messages(session_id, [assistant_msg])
-    if ov_session_id:
-        openviking_capture(ov_session_id, [assistant_msg])
+    _persist(session_id, ov_session_id, [assistant_msg])
 
     return content, reasoning, usage, assistant_msg, all_tool_results, new_history_messages

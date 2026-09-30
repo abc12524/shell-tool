@@ -26,7 +26,7 @@ USAGE = """使用方法：python dp.py [选项] [问题]
 
   直接加问题   → 默认同一对话（复用最近的活跃会话）
   -n, --new    → 终结当前对话，并新开一个对话
-  -s, --session <id> → 指定会话继续对话（可指定已终结的历史会话）
+  -s, --session [id] → 不带 id：列出最近 5 条会话；带 id：继续指定会话（可指定历史会话）
   -k, --key <key>    → 覆盖 DEEPSEEK_API_KEY，并写回 .env
   -m, --model <name> → 覆盖 DEEPSEEK_MODEL，并写回 .env
   不加参数     → 查看此帮助
@@ -34,9 +34,10 @@ USAGE = """使用方法：python dp.py [选项] [问题]
 
 
 def parse_args(argv):
-    """解析命令行参数，返回 (new_flag, session_id, question, api_key, model)"""
+    """解析命令行参数，返回 (new_flag, session_id, list_sessions, question, api_key, model)"""
     new_flag = False
     sid = None
+    list_sessions = False
     api_key = None
     model = None
     question_parts = []
@@ -51,8 +52,9 @@ def parse_args(argv):
                 sid = argv[i + 1]
                 i += 2
             else:
-                print("⚠️  -s/--session 需要指定 session_id")
-                sys.exit(1)
+                # 不带参数 → 列出最近会话
+                list_sessions = True
+                i += 1
         elif a in ('-k', '--key'):
             if i + 1 < len(argv) and argv[i + 1].strip():
                 api_key = argv[i + 1]
@@ -70,61 +72,52 @@ def parse_args(argv):
         else:
             question_parts.append(a)
             i += 1
-    return new_flag, sid, ' '.join(question_parts), api_key, model
+    return new_flag, sid, list_sessions, ' '.join(question_parts), api_key, model
 
 
-# 记录最近一次使用的后端，用于检测 mysql↔sqlite 切换（切换时强制新开 session）
-BACKEND_MARKER_PATH = os.path.join(config.PROJECT_ROOT, 'data', '.last_backend')
-
-
-def _read_last_backend():
-    try:
-        with open(BACKEND_MARKER_PATH) as f:
-            return f.read().strip() or None
-    except OSError:
-        return None
-
-
-def _write_last_backend(backend):
-    os.makedirs(os.path.dirname(BACKEND_MARKER_PATH) or '.', exist_ok=True)
-    with open(BACKEND_MARKER_PATH, 'w') as f:
-        f.write(backend)
-
-
-def resolve_session(new_flag, sid, backend):
+def resolve_session(new_flag, sid):
     """确定会话：
-       -s <id>     → 使用指定会话（在当前后端库内查找）
-       -n          → 终结当前后端所有活跃会话，新开
-       默认        → 同一后端内复用最近活跃会话，无则新建
-       mysql↔sqlite 切换 → 立即新开会话（以 data/.last_backend 标记判断），
-                          同库内原会话保持不动，对话持续
-       (session_id, is_new)
+       -s <id>     → 使用指定会话
+       -n          → 终结当前所有活跃会话，新开
+       默认        → 复用最近活跃会话，无则新建
+       返回 (session_id, is_new)
     """
     if sid:
         if not db.session_exists(sid):
             print(f"⚠️  会话 {sid} 不存在")
             sys.exit(1)
-        _write_last_backend(backend)
         return sid, False
 
-    last_backend = _read_last_backend()
-    switched = last_backend is not None and last_backend != backend
-    if new_flag or switched:
+    if new_flag:
         db.close_all_active_sessions()
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         db.create_session(session_id)
-        _write_last_backend(backend)
         return session_id, True
 
-    # 默认同一后端内同一对话
     session_id = db.get_active_session_id()
     if session_id is None:
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         db.create_session(session_id)
-        _write_last_backend(backend)
         return session_id, True
-    _write_last_backend(backend)
     return session_id, False
+
+
+def print_recent_sessions(limit=5):
+    """列出最近若干条会话（供 -s 无参数查看）"""
+    sessions = db.list_recent_sessions(limit)
+    if not sessions:
+        console.print("暂无历史会话", style="dim")
+        return
+    active_id = db.get_active_session_id()
+    rows = []
+    for s in sessions:
+        when = s['updated_at']
+        when = when.strftime('%Y-%m-%d %H:%M:%S') if hasattr(when, 'strftime') else str(when)
+        status_txt = "活跃" if s['status'] == 'active' else "已结束"
+        mark = " ●" if s['id'] == active_id else ""
+        rows.append((s['id'], f"{status_txt} · {when} · {s['n']} 条消息{mark}"))
+    render_table(f"🕘 最近 {len(sessions)} 条会话", rows)
+    console.print("继续会话：python dp.py -s <id> \"你的问题\"", style="dim")
 
 
 def build_system_prompt(now_str=None):
@@ -179,7 +172,7 @@ def main():
 
 
 async def _async_main():
-    new_flag, sid, question, api_key, model = parse_args(sys.argv)
+    new_flag, sid, list_sessions, question, api_key, model = parse_args(sys.argv)
     asked_at = datetime.now(timezone.utc)
 
     # -k/-m：覆盖并写回 .env，本次进程与后续进程（含 8000 端口调用）均生效
@@ -192,6 +185,17 @@ async def _async_main():
         config.update_env(**updates)
         print(f"⚙️  已更新 .env：{'、'.join(updates)}")
 
+    try:
+        db.resolve_backend()
+    except Exception as e:
+        print(f"❌ 数据库初始化失败：{e}")
+        sys.exit(1)
+
+    # -s 无参数：只列出最近会话后退出
+    if list_sessions:
+        print_recent_sessions()
+        sys.exit(0)
+
     if not question:
         print(USAGE)
         sys.exit(0)
@@ -200,17 +204,12 @@ async def _async_main():
         print("⚠️  缺少 DEEPSEEK_API_KEY，请在 .env 中配置")
         sys.exit(1)
 
-    try:
-        backend = db.resolve_backend()
-    except Exception as e:
-        print(f"❌ 数据库初始化失败：{e}")
-        sys.exit(1)
-    if backend == 'sqlite':
-        print("🗄️  使用本地 SQLite 数据库")
+    if db.online_enabled():
+        print("🗄️  本地 SQLite + 在线 MySQL 同步")
     else:
-        print("🗄️  使用在线 MySQL 数据库")
+        print("🗄️  使用本地 SQLite 数据库")
 
-    session_id, is_new = resolve_session(new_flag, sid, backend)
+    session_id, is_new = resolve_session(new_flag, sid)
 
     # OV 自动捕获：为当前会话建立 OV session（OV_AUTO_CAPTURE 开关控制）
     ov_session_id = ''
