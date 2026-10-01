@@ -109,6 +109,31 @@ def _normalize_usage(usage):
     )
 
 
+_USAGE_FIELDS = (
+    'prompt_tokens',
+    'completion_tokens',
+    'prompt_cache_hit_tokens',
+    'prompt_cache_miss_tokens',
+    'total_tokens',
+    'reasoning_tokens',
+)
+
+
+def _add_usage(total, usage):
+    """把单次请求的 usage 逐项累加到总计，返回覆盖整轮对话的总用量。
+
+    工具调用循环中每次请求都会返回各自独立的 usage，首次调用创建累计对象，
+    之后每轮相加，避免只保留最后一次请求、导致统计与官方账单对不上。
+    """
+    if usage is None:
+        return total
+    if total is None:
+        total = SimpleNamespace(**{f: 0 for f in _USAGE_FIELDS})
+    for f in _USAGE_FIELDS:
+        setattr(total, f, getattr(total, f, 0) + (getattr(usage, f, 0) or 0))
+    return total
+
+
 async def stream_responses_api(client, messages):
     """异步调用 Responses API 流式接口，返回 (content, reasoning, tool_calls, output_items, usage)
 
@@ -311,17 +336,22 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
       若模型在最终回答轮仍请求调用工具（依赖链场景），
       在 MAX_TOOL_ROUNDS 预算内可再执行，超出则强制基于已有结果作答。
 
-      返回: (content, reasoning, usage, assistant_msg, all_tool_results, new_history_messages)
+      返回: (content, reasoning, total_usage, assistant_msg, all_tool_results, new_history_messages)
+      total_usage 为整轮对话内所有请求 usage 的累计值，用于准确的 token/费用统计。
     """
+    # 累计整轮对话（含所有工具轮）的 token 用量
+    total_usage = None
+
     # ---- 请求 1.1：工具 + 问题 → 思维链 + 工具调用 ----
     content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+    total_usage = _add_usage(total_usage, usage)
     web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
     assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
 
     # 无工具调用 → 直接返回最终回答（先落库，避免简单问答的回复丢失）
     if not tool_calls and not web_search_calls:
         _persist(session_id, ov_session_id, [assistant_msg])
-        return content, reasoning, usage, assistant_msg, [], [assistant_msg]
+        return content, reasoning, total_usage, assistant_msg, [], [assistant_msg]
 
     all_tool_results = []
     new_history_messages = []
@@ -361,6 +391,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         print("\n" + "=" * 30)
         console.print("🤔 继续推理...", style="dim italic")
         content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+        total_usage = _add_usage(total_usage, usage)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
 
@@ -378,6 +409,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
             messages.append(recall_msg)
             _persist(session_id, ov_session_id, [recall_msg])
         content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+        total_usage = _add_usage(total_usage, usage)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
         new_history_messages.append(force_msg)
@@ -385,4 +417,4 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
     new_history_messages.append(assistant_msg)
     _persist(session_id, ov_session_id, [assistant_msg])
 
-    return content, reasoning, usage, assistant_msg, all_tool_results, new_history_messages
+    return content, reasoning, total_usage, assistant_msg, all_tool_results, new_history_messages
