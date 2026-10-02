@@ -536,6 +536,12 @@ def backup_file(file_path: str):
 DEFAULT_LIMIT = 400
 
 
+def _is_plain(language) -> bool:
+    """语言为空或不在解析器表中时按纯文本处理（md/txt 等）"""
+    key = _normalize_language(language)
+    return not key or key not in PARSERS
+
+
 def _select_symbols(parsed: ParseResult, symbol, pattern):
     """按符号名（可为单个或多个）与正则筛选符号，返回 (selected, err)"""
     wanted: List[str] = []
@@ -579,6 +585,32 @@ def _emit_symbols(lines, selected, limit, source):
     return ok(payload)
 
 
+def _emit_matches(code, symbol, pattern, limit, source):
+    """纯文本按 symbol（子串）/ pattern（正则）逐行匹配，带绝对行号输出。"""
+    lines = code.splitlines()
+    try:
+        rx = re.compile(pattern) if pattern else None
+    except re.error as e:
+        return error(f"正则表达式非法: {e}", code="bad_pattern")
+    wanted: List[str] = []
+    if symbol:
+        wanted = [symbol] if isinstance(symbol, str) else [str(x) for x in symbol]
+    idxs = [i for i, line in enumerate(lines)
+            if (rx and rx.search(line)) or any(w in line for w in wanted)]
+    if not idxs:
+        return error("未匹配到内容", code="not_found")
+    width = len(str(len(lines)))
+    shown = idxs[:limit]
+    truncated = len(idxs) > limit
+    body = [f"{i + 1:>{width}}: {lines[i]}" for i in shown]
+    payload = {"action": "read", "target": "text", "matches": len(idxs),
+               "result": "\n".join(body), "truncated": truncated}
+    if truncated:
+        payload["next_hint"] = f"共 {len(idxs)} 处匹配，已显示前 {limit} 处"
+    payload.update(source)
+    return ok(payload)
+
+
 def _emit_range(code, start, end, limit, source):
     """输出行范围（带绝对行号），超限截断并给出 next_start_line"""
     lines = code.splitlines()
@@ -606,13 +638,15 @@ def _emit_range(code, start, end, limit, source):
 
 
 def _read(code, language, symbol, pattern, start_line, end_line, limit, source):
-    """read 动作：优先按 symbol/pattern 批量，其次按行号范围，最后回退结构骨架"""
+    """read 动作：优先按 symbol/pattern 批量，其次按行号范围，最后回退结构骨架/纯文本"""
     if not code.strip():
         return error("文件内容为空", code="empty_code")
 
+    plain = _is_plain(language)
+
     if symbol or pattern:
-        if not language:
-            return error("read symbol/pattern 需要 language", code="missing_argument")
+        if plain:
+            return _emit_matches(code, symbol, pattern, limit, source)
         try:
             parsed = get_parser(code, language).parse()
         except SyntaxError as e:
@@ -638,11 +672,9 @@ def _read(code, language, symbol, pattern, start_line, end_line, limit, source):
             return error("start_line / end_line 必须为整数", code="bad_range")
         return _emit_range(code, start, end, limit, source)
 
-    if not language:
-        return error(
-            "read 需指定 symbol/pattern 或 start_line/end_line；或提供/可推断 language 返回骨架",
-            code="missing_argument",
-        )
+    if plain:
+        total = len(code.splitlines())
+        return _emit_range(code, 1, total, limit, source)
     try:
         payload = {"action": "read", "target": "outline",
                    "language": _normalize_language(language),
@@ -676,6 +708,63 @@ def _replace(code: str, old_code: str, new_code: str, replace_all: bool):
     if replace_all:
         return code.replace(old_code, new_code), count, None
     return code.replace(old_code, new_code, 1), 1, None
+
+
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _split_lines(code: str):
+    """拆成行列表并记录是否以换行结尾（写回时还原）。"""
+    trailing = code.endswith("\n")
+    lines = code.split("\n")
+    if trailing and lines and lines[-1] == "":
+        lines.pop()
+    return lines, trailing
+
+
+def _join_lines(lines: List[str], trailing: bool) -> str:
+    text = "\n".join(lines)
+    if trailing and text:
+        text += "\n"
+    return text
+
+
+def _new_lines(new_code: str) -> List[str]:
+    if not new_code:
+        return []
+    lines = new_code.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _replace_lines(code: str, start, end, new_code: str):
+    """按行号替换 [start, end]（1-based，含端点）为 new_code，返回 (new_src, err)。"""
+    lines, trailing = _split_lines(code)
+    total = len(lines)
+    if start is None or start < 1 or start > total:
+        return None, f"起始行需在 1-{total}: {start}"
+    if end is None:
+        end = start
+    if end < start or end > total:
+        return None, f"结束行需在 {start}-{total}: {end}"
+    lines[start - 1:end] = _new_lines(new_code)
+    return _join_lines(lines, trailing), None
+
+
+def _insert_after_line(code: str, at, new_code: str):
+    """在 start_line 行之后插入 new_code（0 表示文件开头），返回 (new_src, err)。"""
+    lines, trailing = _split_lines(code)
+    total = len(lines)
+    at = total if at is None else at
+    if at < 0 or at > total:
+        return None, f"插入行需在 0-{total}: {at}"
+    lines[at:at] = _new_lines(new_code)
+    return _join_lines(lines, trailing), None
 
 
 def _finish(file_path, encoding, newline, action, count, count_key, new_src):
@@ -751,8 +840,12 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
     if act == "outline":
         if not code.strip():
             return error("文件内容为空", code="empty_code")
-        if not language:
-            return error("outline 需要提供 language（或文件名可推断）", code="missing_argument")
+        if _is_plain(language):
+            payload = {"action": "outline", "language": "text",
+                       "result": render_skeleton(
+                           ParseResult("text", len(code.splitlines()), [], [], [], {}))}
+            payload.update(source)
+            return ok(payload)
         try:
             payload = {"action": "outline", "language": _normalize_language(language),
                        "result": build_skeleton(code, language)}
@@ -768,20 +861,30 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
     # add / edit / delete 需要可写来源
     if not writable:
         return error("url 为只读，不能修改", code="read_only")
-    if not code.strip():
-        return error("文件内容为空", code="empty_code")
+
+    line_mode = start_line is not None
 
     if act == "delete":
+        if line_mode:
+            new_src, err = _replace_lines(code, _as_int(start_line), _as_int(end_line), "")
+            if err:
+                return error(err, code="bad_range")
+            return _finish(file_path, encoding, newline, "delete", 1, "replaced", new_src)
         if not old_code:
-            return error("delete 需要提供 old_code", code="missing_argument")
+            return error("delete 需要提供 old_code 或 start_line", code="missing_argument")
         new_src, count, err = _replace(code, old_code, "", replace_all)
         if err:
             return error(err, code="not_found")
         return _finish(file_path, encoding, newline, "delete", count, "replaced", new_src)
 
     if act == "edit":
+        if line_mode:
+            new_src, err = _replace_lines(code, _as_int(start_line), _as_int(end_line), new_code)
+            if err:
+                return error(err, code="bad_range")
+            return _finish(file_path, encoding, newline, "edit", 1, "replaced", new_src)
         if not old_code:
-            return error("edit 需要提供 old_code", code="missing_argument")
+            return error("edit 需要提供 old_code 或 start_line", code="missing_argument")
         if new_code == old_code:
             return error("new_code 与 old_code 相同，无需修改", code="no_change")
         new_src, count, err = _replace(code, old_code, new_code, replace_all)
@@ -792,6 +895,11 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
     # add
     if not new_code:
         return error("add 需要提供 new_code", code="missing_argument")
+    if line_mode:
+        new_src, err = _insert_after_line(code, _as_int(start_line), new_code)
+        if err:
+            return error(err, code="bad_range")
+        return _finish(file_path, encoding, newline, "add", 1, "inserted", new_src)
     if not old_code:
         sep = "" if code.endswith("\n") else "\n"
         new_src, count = code + sep + new_code, 1
