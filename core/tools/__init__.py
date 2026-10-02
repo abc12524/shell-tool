@@ -16,6 +16,7 @@ from .ov_tools import (
     openviking_load_profile,
 )
 from .other_ov_tool import other_ov_tool
+from .script_tools import script_editor
 from .. import config
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "get_system_info",
     "execute_system_command",
     "baidu_search",
+    "script_editor",
     "openviking_search",
     "openviking_find",
     "openviking_remember",
@@ -84,6 +86,85 @@ TOOLS = [
                     }
                 },
                 "required": ["mode", "query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "script_editor",
+            "description": (
+                "对脚本做增删改查（CRUD）并按需读取片段/结构。数据来源为 file_path（本地文件，可写）"
+                "或 url（http/https，只读），工具自行读取并自动探测编码（utf-8/BOM/gb18030/big5 等），输出统一 UTF-8。"
+                "read=symbol（单个或数组）/pattern（正则）批量取符号，或 start_line~end_line 行范围，"
+                "都不给则返回结构骨架；输出均带行号，超 limit 截断并给续读提示。"
+                "outline=结构骨架（每个符号带起止行号，便于随后按范围精确读）。"
+                "edit=用 new_code 精确替换 old_code；delete=删除 old_code；"
+                "add=在 old_code 之后插入 new_code（省略 old_code 则追加末尾）。"
+                "编辑采用精确字符串替换（对齐 edit 工具）：old_code 需逐字符一致，唯一匹配才执行，"
+                "匹配多处需显式 replace_all=true；本地文件修改会写回并先生成 .bak 备份。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "outline", "add", "edit", "delete"],
+                        "description": "read=读片段/骨架; outline=读结构骨架; add=在 old_code 后插入 new_code; edit=用 new_code 替换 old_code; delete=删除 old_code"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "本地脚本文件路径（可读写；修改写回并备份）。与 url 二选一"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "http/https 脚本 URL（只读，不能修改）。与 file_path 二选一"
+                    },
+                    "language": {
+                        "type": "string",
+                        "enum": ["python", "java", "kotlin", "c", "cpp", "csharp", "javascript", "typescript", "shell"],
+                        "description": "脚本语言（read symbol/pattern、outline 时需要；省略则按文件名/URL 扩展名推断）"
+                    },
+                    "symbol": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ],
+                        "description": "read 时按符号名返回源码（可传数组批量），如 'ClassName.method'"
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "read 时按正则匹配符号名批量返回（与 symbol 可同时使用）"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "read 时起始行号（1-based，含），省略则从第 1 行开始"
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "read 时结束行号（1-based，含），省略则到文件末尾"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "read 输出最大行数，默认 400，超出截断并返回续读提示"
+                    },
+                    "old_code": {
+                        "type": "string",
+                        "description": "要精确匹配的原文片段（add/edit/delete 用；add 省略则追加末尾）"
+                    },
+                    "new_code": {
+                        "type": "string",
+                        "description": "edit=替换后的新片段；add=要插入的新片段；delete 不用"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "old_code 匹配到多处时是否全部替换/插入，默认 false（多处则报错）"
+                    }
+                },
+                "required": ["action"]
             }
         }
     },
@@ -234,6 +315,7 @@ TOOL_FUNCTIONS = {
     "get_system_info": lambda args: ok(get_system_info()),
     "execute_system_command": lambda args: execute_system_command(args.get('command', '')),
     "baidu_search": lambda args: baidu_search(args.get('mode', 'raw'), args.get('query', '')),
+    "script_editor": lambda args: script_editor(args.get('action', ''), args.get('file_path'), args.get('url'), args.get('language'), args.get('symbol'), args.get('pattern'), args.get('start_line'), args.get('end_line'), args.get('limit', 400), args.get('old_code'), args.get('new_code'), args.get('replace_all', False)),
     "openviking_search": lambda args: openviking_search(args.get('query', ''), args.get('score_threshold'), args.get('limit')),
     "openviking_find": lambda args: openviking_find(args.get('query', ''), args.get('score_threshold'), args.get('limit'), args.get('target_uri', '')),
     "openviking_read": lambda args: openviking_read(args.get('uri', '')),
