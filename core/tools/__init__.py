@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
-"""工具包：工具实现 + 工具定义（TOOLS schema）+ 工具调用分发器"""
+"""工具包：原生 function 工具（系统信息 / 命令执行 / skill 合集）+ 工具调用分发器
+
+tool 层只保留与运行环境强相关的少量原生工具；ov（OpenViking 记忆）、
+script（脚本/代码编辑）、search（百度搜索）等一律下沉为 skill/ 目录下的脚本，
+由 skill_tool 扫描脚本头部自动注册并在进程内执行。
+"""
 import asyncio
 import json
 import re
 
 from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
-from .search_tools import baidu_search
-from .ov_tools import (
-    openviking_search,
-    openviking_find,
-    openviking_remember,
-    openviking_read,
-    openviking_load_context,
-    openviking_load_profile,
-)
-from .other_ov_tool import other_ov_tool
-from .script_tools import script_editor
+from .skill_tool import skill_tool
 from .. import config
 
 __all__ = [
@@ -24,19 +19,12 @@ __all__ = [
     "process_tool_calls",
     "get_system_info",
     "execute_system_command",
-    "baidu_search",
-    "script_editor",
-    "openviking_search",
-    "openviking_find",
-    "openviking_remember",
-    "openviking_read",
-    "openviking_load_context",
-    "openviking_load_profile",
-    "other_ov_tool",
+    "skill_tool",
 ]
 
 
 # 工具定义列表（符合 OpenAI/DeepSeek 的 tool 格式）
+# 原生 tool：系统信息 / 命令执行 / skill 统一入口（skill 列表由 skill/ 目录自动注册）。
 TOOLS = [
     {
         "type": "function",
@@ -70,231 +58,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "baidu_search",
-            "description": "百度搜索 / 百科查询。通过百度千帆引擎搜索互联网信息或查询百科词条。适用于：搜索最新资讯、查百科、查询知识类问题。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "mode": {
-                        "type": "string",
-                        "enum": ["raw", "summary", "baike", "baikelist"],
-                        "description": "搜索模式：raw=原始搜索结果, summary=网页摘要(AI总结+来源), baike=百科词条详情, baikelist=百科搜索列表"
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "搜索关键词或百科词条名"
-                    }
-                },
-                "required": ["mode", "query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "script_editor",
+            "name": "skill",
             "description": (
-                "对脚本做增删改查（CRUD）并按需读取片段/结构。数据来源为 file_path（本地文件，可写）"
-                "或 url（http/https，只读），工具自行读取并自动探测编码（utf-8/BOM/gb18030/big5 等），输出统一 UTF-8。"
-                "read=symbol（单个或数组）/pattern（正则）批量取符号，或 start_line~end_line 行范围，"
-                "都不给则返回结构骨架；输出均带行号，超 limit 截断并给续读提示。"
-                "outline=结构骨架（每个符号带起止行号，便于随后按范围精确读）。"
-                "edit=用 new_code 精确替换 old_code；delete=删除 old_code；"
-                "add=在 old_code 之后插入 new_code（省略 old_code 则追加末尾）。"
-                "编辑采用精确字符串替换（对齐 edit 工具）：old_code 需逐字符一致，唯一匹配才执行，"
-                "匹配多处需显式 replace_all=true；本地文件修改会写回并先生成 .bak 备份。"
+                "skill 合集（由 skill/ 目录脚本自动注册）：ov=OpenViking 记忆、"
+                "script=脚本/代码增删改查、search=百度搜索。"
+                "all=true 列出所有 skill 及说明；skill='名称' 查看用法；"
+                "skill='名称' 并传 arguments={参数} 执行。"
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["read", "outline", "add", "edit", "delete"],
-                        "description": "read=读片段/骨架; outline=读结构骨架; add=在 old_code 后插入 new_code; edit=用 new_code 替换 old_code; delete=删除 old_code"
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "本地脚本文件路径（可读写；修改写回并备份）。与 url 二选一"
-                    },
-                    "url": {
-                        "type": "string",
-                        "description": "http/https 脚本 URL（只读，不能修改）。与 file_path 二选一"
-                    },
-                    "language": {
-                        "type": "string",
-                        "enum": ["python", "java", "kotlin", "c", "cpp", "csharp", "javascript", "typescript", "shell"],
-                        "description": "脚本语言（read symbol/pattern、outline 时需要；省略则按文件名/URL 扩展名推断）"
-                    },
-                    "symbol": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {"type": "array", "items": {"type": "string"}}
-                        ],
-                        "description": "read 时按符号名返回源码（可传数组批量），如 'ClassName.method'"
-                    },
-                    "pattern": {
-                        "type": "string",
-                        "description": "read 时按正则匹配符号名批量返回（与 symbol 可同时使用）"
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "read 时起始行号（1-based，含），省略则从第 1 行开始"
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "read 时结束行号（1-based，含），省略则到文件末尾"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "read 输出最大行数，默认 400，超出截断并返回续读提示"
-                    },
-                    "old_code": {
-                        "type": "string",
-                        "description": "要精确匹配的原文片段（add/edit/delete 用；add 省略则追加末尾）"
-                    },
-                    "new_code": {
-                        "type": "string",
-                        "description": "edit=替换后的新片段；add=要插入的新片段；delete 不用"
-                    },
-                    "replace_all": {
-                        "type": "boolean",
-                        "description": "old_code 匹配到多处时是否全部替换/插入，默认 false（多处则报错）"
-                    }
-                },
-                "required": ["action"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "openviking_search",
-            "description": "在 OpenViking 外置记忆中做上下文感知语义搜索（search 接口：结合会话语境提升召回），查找之前保存的知识、偏好、项目信息等。当用户的问题涉及已知信息时先查记忆。可由你自行判断相似度阈值与返回条数。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "搜索关键词，描述要查找什么内容"
-                    },
-                    "score_threshold": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                        "description": "相似度阈值（0~1），默认 0.4。阈值越高要求记忆与问题越相关"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 10,
-                        "description": "返回条数上限（0~10），默认 3"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "openviking_find",
-            "description": "在 OpenViking 外置记忆中做语义搜索（find 接口：纯向量相似度、无会话上下文、低延迟），查找之前保存的知识、偏好、项目信息等。当用户的问题涉及已知信息时先查记忆。可由你自行判断相似度阈值、返回条数与检索范围。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "搜索关键词，描述要查找什么内容"
-                    },
-                    "score_threshold": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                        "description": "相似度阈值（0~1），默认 0.4。阈值越高要求记忆与问题越相关"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 10,
-                        "description": "返回条数上限（0~10），默认 3"
-                    },
-                    "target_uri": {
-                        "type": "string",
-                        "description": "可选，限定检索范围的 Viking URI 前缀，如 viking://user/memories/（仅用户记忆）、viking://resources/my-project/（指定项目）。留空则在全部范围检索"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "openviking_remember",
-            "description": "将重要信息保存到 OpenViking 外置记忆中，以便后续对话回忆。适合保存：用户偏好、项目配置、关键决策、有用的操作经验。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "category": {
-                        "type": "string",
-                        "enum": ["preferences", "entities", "events", "experiences"],
-                        "description": "记忆分类：preferences=用户偏好, entities=项目/概念/人物, events=决策/里程碑, experiences=操作经验"
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "记忆名称/主题，如 'search_preference', 'project_hermes', 'deploy_decision'"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "要保存的内容，用 Markdown 格式"
-                    }
-                },
-                "required": ["category", "name", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "openviking_read",
-            "description": "通过 URI 读取 OpenViking 记忆中的 .md 文件内容。uri 支持单个文件 URI 或 URI 数组（同时读取多个文件）。URI 格式: viking://user/{user}/...",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "uri": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {"type": "array", "items": {"type": "string"}}
-                        ],
-                        "description": "单个文件 URI，或文件 URI 数组，如 viking://user/p30/peers/default/memories/entities/home_snmp_ap_info.md"
-                    }
-                },
-                "required": ["uri"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "other_ov_tool",
-            "description": "OpenViking 其他工具合集（除 search/remember/read 外），含 9 个子工具：list_dir/write_file/forget/session 系列。all=true 列出所有工具及说明；tool=子工具名 查看使用方式；tool+arguments 实际执行子工具。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "all": {
                         "type": "boolean",
-                        "description": "设为 true 时列出合集内所有工具的说明（不含使用方式）"
+                        "description": "设为 true 时列出所有已注册 skill 及说明"
                     },
-                    "tool": {
+                    "skill": {
                         "type": "string",
-                        "description": "要查询或执行的子工具名，如 openviking_write_file / openviking_create_session"
+                        "description": "要查询或执行的 skill 名称，如 ov / script / search"
                     },
                     "arguments": {
                         "type": "object",
-                        "description": "子工具的执行参数字典，配合 tool 使用（如 {\"uri\": \"...\", \"content\": \"...\", \"mode\": \"create\"}）"
+                        "description": "执行参数对象（如 {\"action\": \"search\", \"query\": \"...\"}）；不传则返回该 skill 用法"
                     }
                 },
                 "required": []
@@ -304,8 +88,8 @@ TOOLS = [
 ]
 
 
-# DeepSeek Responses API 内置 web 搜索工具（服务端自动执行，区别于本地的 baidu_search 等）。
-# 由 .env 的 LLM_WEB_SEARCH 控制开关（默认开启）；关闭后模型不再被提供该能力。
+# DeepSeek Responses API 内置 web 搜索工具（服务端自动执行，区别于 skill 里的 search）。
+# 由 .env 的 LLM_WEB_SEARCH 控制开关；关闭后模型不再被提供该能力。
 if config.LLM_WEB_SEARCH:
     TOOLS.append({"type": "web_search"})
 
@@ -314,13 +98,7 @@ if config.LLM_WEB_SEARCH:
 TOOL_FUNCTIONS = {
     "get_system_info": lambda args: ok(get_system_info()),
     "execute_system_command": lambda args: execute_system_command(args.get('command', '')),
-    "baidu_search": lambda args: baidu_search(args.get('mode', 'raw'), args.get('query', '')),
-    "script_editor": lambda args: script_editor(args.get('action', ''), args.get('file_path'), args.get('url'), args.get('language'), args.get('symbol'), args.get('pattern'), args.get('start_line'), args.get('end_line'), args.get('limit', 400), args.get('old_code'), args.get('new_code'), args.get('replace_all', False)),
-    "openviking_search": lambda args: openviking_search(args.get('query', ''), args.get('score_threshold'), args.get('limit')),
-    "openviking_find": lambda args: openviking_find(args.get('query', ''), args.get('score_threshold'), args.get('limit'), args.get('target_uri', '')),
-    "openviking_read": lambda args: openviking_read(args.get('uri', '')),
-    "openviking_remember": lambda args: openviking_remember(args.get('category', 'entities'), args.get('name', 'untitled'), args.get('content', '')),
-    "other_ov_tool": lambda args: other_ov_tool(args.get('all', False), args.get('tool', ''), args.get('arguments')),
+    "skill": lambda args: skill_tool(args.get('all', False), args.get('skill', ''), args.get('arguments')),
 }
 
 

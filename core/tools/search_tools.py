@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""搜索类工具：baidu_search（调用 qianfan.py 子进程）"""
+"""搜索类工具：baidu_search（调用 skill/qianfan.py 子进程）
+
+由 skill/search.py 进程内调用；qianfan.py 为搜索助手模块，不作为 skill 注册。
+"""
 import json
 import os
 import sys
@@ -11,8 +14,8 @@ from .envelope import ok, error
 
 
 def baidu_search(mode: str, query: str) -> str:
-    """百度千帆搜索：调用 scripts/qianfan.py 获取搜索结果"""
-    qianfan_script = os.path.join(PROJECT_ROOT, "scripts", "qianfan.py")
+    """百度千帆搜索：调用 skill/qianfan.py 获取搜索结果"""
+    qianfan_script = os.path.join(PROJECT_ROOT, "skill", "qianfan.py")
     if not os.path.exists(qianfan_script):
         return error("qianfan.py 不存在", code="missing_script")
     try:

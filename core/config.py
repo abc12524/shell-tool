@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 # core/ 目录（本文件所在目录）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# 项目根目录（core 的上一级，用于定位 scripts/ 等外部资源）
+# 项目根目录（core 的上一级，用于定位 skill/ 等外部资源）
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 # .env 文件路径（-k/-m 等运行时覆盖写回此处）；缺失时从模板复制
 ENV_PATH = os.path.join(PROJECT_ROOT, '.env')

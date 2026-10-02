@@ -5,6 +5,7 @@
 ## 功能特性
 
 - **系统命令执行** — 跨平台执行 Linux/macOS (bash) 与 Windows (PowerShell/CMD) 命令
+- **技能体系（skill）** — 除系统工具外，OpenViking 记忆（`ov`）、脚本/代码编辑（`script`）、百度搜索（`search`）均下沉为 `skill/` 目录脚本；按脚本头部标准结构自动注册，新增能力只需新增脚本，无需改动核心
 - **脚本增删改查** — 数据源为本地 `file_path`（可写，改后写回并生成 `.bak` 备份）或 http(s) `url`（只读），工具自动探测编码（utf-8/gb18030/big5 等）；read 支持按 `symbol`（单个/数组）/`pattern` 正则批量、按 `start_line~end_line` 取片段（带行号、可 `limit` 分页），或返回带行号的 `outline` 骨架；改/增/删采用精确字符串替换（对齐 edit 工具，唯一匹配、支持 `replace_all`）
 - **百度搜索** — 通过百度千帆引擎搜索网页 / 查询百科
 - **OpenViking 记忆** — 语义搜索历史记忆、保存用户偏好/项目信息/决策、读取与写入记忆文件、Session 管理
@@ -24,17 +25,38 @@ shell-tool/
 │   ├── llm.py                # API 调用层：流式请求 + 工具调用循环
 │   ├── main.py               # CLI 主流程：参数解析、会话管理、记忆注入
 │   └── tools/
-│       ├── system_tools.py   # 系统信息 / 命令执行
-│       ├── search_tools.py   # 百度搜索（调用 scripts/qianfan.py）
-│       ├── script_tools.py   # 脚本增删改查（script_editor：精确替换 + 结构骨架 outline）
-│       ├── ov_tools.py       # OpenViking 记忆工具（search/find/remember/read/...）
-│       ├── other_ov_tool.py  # OpenViking 其他工具合集入口
-│       └── __init__.py       # 工具 schema 定义与调用分发器
-├── scripts/
-│   └── qianfan.py            # 百度千帆搜索脚本
+│       ├── system_tools.py   # 系统信息 / 命令执行（原生 tool）
+│       ├── skill_tool.py     # skill 注册表：扫描 skill/ 头部自动注册 + 分发执行
+│       ├── ov_tools.py       # OpenViking 记忆底层实现（含自动召回/捕获等生命周期逻辑）
+│       ├── script_tools.py   # 脚本/代码编辑底层实现
+│       ├── search_tools.py   # 百度搜索底层实现（内部调用 skill/qianfan.py）
+│       └── __init__.py       # 原生工具 schema（get_system_info/execute_system_command/skill）+ 分发器
+├── skill/                    # skill 脚本目录：按头部标准结构自动注册
+│   ├── ov.py                 # skill: ov     —— OpenViking 记忆统一入口
+│   ├── script.py             # skill: script —— 脚本/代码增删改查
+│   ├── search.py             # skill: search —— 百度搜索 / 百科
+│   └── qianfan.py            # 百度千帆搜索助手（无 skill 头，不注册）
 ├── server/
 │   └── api.py                # Flask HTTP API（同步 + SSE 流式）
 └── .env.example              # 环境变量模板
+
+### 新增 skill
+
+在 `skill/` 目录新增一个 `.py` 脚本，文件头部按标准结构声明即可自动注册，无需改动核心：
+
+```python
+# skill: my_skill
+# description: 一句话说明
+# usage:
+#   arguments.foo = ...
+#   示例: {"foo": "bar"}
+def run(arguments: dict) -> str:
+    # 返回统一信封字符串（ok()/error()）
+    ...
+```
+
+模型侧只暴露一个 `skill` 工具：`all=true` 列出全部 skill，传 `skill=<名称>` 查看用法，
+传 `skill=<名称>` + `arguments={...}` 执行。未声明 `# skill:` 的脚本不会被注册。
 ```
 
 ## 安装
@@ -63,7 +85,7 @@ cp .env.example .env
 | `DB_ONLINE` | 在线 MySQL 同步开关：`true`=开启同步（默认 true；未配置或连接失败则仅用 SQLite），`false`=关闭 |
 | `SQLITE_DB_PATH` | 本地 SQLite 文件路径（唯一读写源，默认 `data/shell_tool.db`） |
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | 在线 MySQL（同步副本）连接信息 |
-| `BAIDU_QIANFAN_KEY` | 百度千帆搜索密钥（`scripts/qianfan.py`） |
+| `BAIDU_QIANFAN_KEY` | 百度千帆搜索密钥（`skill/qianfan.py`） |
 | `OPENVIKING_URL/KEY/USER` | OpenViking 外置记忆服务 |
 
 ### 数据库存储
@@ -139,6 +161,8 @@ curl http://localhost:8000/health
 ## 工具调用流程
 
 对话开始时批量并行执行模型请求的全部工具调用，结果一次性回传后直接输出最终回答；若模型在最终轮仍请求调用工具，在 `MAX_TOOL_ROUNDS` 预算内可再执行，超出则强制基于已有结果作答。所有工具统一返回规范信封 `{"status":"ok","result":{...}}` / `{"status":"error","error":...}`，与 OpenViking 后端及 DSH 会话格式保持一致。
+
+模型面向的原生工具只有 `get_system_info`、`execute_system_command`、`skill` 三个；其中 `skill` 负责列出 / 查看用法 / 执行 `skill/` 目录下的脚本（`ov` / `script` / `search`），脚本在进程内执行，新增脚本即自动注册。
 
 ## 安全说明
 
