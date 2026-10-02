@@ -9,6 +9,7 @@
 #   add    : 在 old_code 之后插入 new_code（省略 old_code 则追加末尾）
 #   edit   : 用 new_code 精确替换 old_code（唯一匹配才执行，多处需 replace_all=true）
 #   delete : 删除 old_code
+#   写入动作默认返回 unified diff；dry_run=true 只回显 diff 不落盘
 #   示例: {"action": "read", "file_path": "core/main.py", "symbol": "parse_args"}
 from core.tools.script_tools import script_editor
 
@@ -28,4 +29,5 @@ def run(arguments):
         old_code=a.get("old_code"),
         new_code=a.get("new_code"),
         replace_all=a.get("replace_all", False),
+        dry_run=a.get("dry_run", False),
     )

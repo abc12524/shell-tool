@@ -13,9 +13,11 @@
 语言：python / java / kotlin / c / cpp / csharp / javascript / typescript / shell
 """
 import ast
+import difflib
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse
@@ -522,9 +524,20 @@ def fetch_url(url: str, timeout: int = 30):
 
 
 def backup_file(file_path: str):
-    """写回前生成 .bak 备份，返回 (backup_path, err)。"""
+    """写回前生成备份，返回 (backup_path, err)。
+
+    首次备份写 <file>.bak（永久保留原始版本），之后每次改用时间戳
+    <file>.bak.YYYYmmddHHMMSS（同名时追加序号），避免历史被覆盖。
+    """
     try:
         bak = file_path + ".bak"
+        if os.path.exists(bak):
+            stamp = time.strftime("%Y%m%d%H%M%S")
+            bak = f"{file_path}.bak.{stamp}"
+            n = 1
+            while os.path.exists(bak):
+                bak = f"{file_path}.bak.{stamp}.{n}"
+                n += 1
         shutil.copy2(file_path, bak)
         return bak, None
     except OSError as e:
@@ -701,8 +714,14 @@ def _replace(code: str, old_code: str, new_code: str, replace_all: bool):
     if count == 0:
         return None, 0, "old_code 未找到（需与源码逐字符完全一致，包含缩进与换行）"
     if count > 1 and not replace_all:
+        lines_hit: List[int] = []
+        start = 0
+        for _ in range(count):
+            idx = code.find(old_code, start)
+            lines_hit.append(code.count("\n", 0, idx) + 1)
+            start = idx + len(old_code)
         return None, count, (
-            f"old_code 匹配到 {count} 处，无法确定目标；"
+            f"old_code 匹配到 {count} 处（行 {', '.join(map(str, lines_hit))}），无法确定目标；"
             f"请提供更精确的片段，或设 replace_all=true 全部匹配"
         )
     if replace_all:
@@ -767,22 +786,102 @@ def _insert_after_line(code: str, at, new_code: str):
     return _join_lines(lines, trailing), None
 
 
-def _finish(file_path, encoding, newline, action, count, count_key, new_src):
-    """写回前备份，再落盘；返回摘要（不含全量源码，省 token）。"""
+def _add_after(code: str, anchor: str, new_code: str, replace_all: bool):
+    """在 anchor 之后按「行边界」插入 new_code，返回 (new_src, count, err)。
+
+    统一换行语义，避免 anchor 与 new_code 粘连成 `WORKDIR /appRUN ...`：
+    - 若 anchor 不以换行结尾，则补一个换行再放 new_code；
+    - 若 new_code 不以换行结尾，则补一个换行（其后已有换行时不重复补）。
+    """
+    count = code.count(anchor)
+    if count == 0:
+        return None, 0, "old_code 未找到（需与源码逐字符完全一致，包含缩进与换行）"
+    if count > 1 and not replace_all:
+        lines_hit: List[int] = []
+        start = 0
+        for _ in range(count):
+            idx = code.find(anchor, start)
+            lines_hit.append(code.count("\n", 0, idx) + 1)
+            start = idx + len(anchor)
+        return None, count, (
+            f"old_code 匹配到 {count} 处（行 {', '.join(map(str, lines_hit))}），无法确定目标；"
+            f"请提供更精确的片段，或设 replace_all=true 全部匹配"
+        )
+    out: List[str] = []
+    pos = 0
+    inserted = 0
+    while True:
+        idx = code.find(anchor, pos)
+        if idx == -1:
+            out.append(code[pos:])
+            break
+        end = idx + len(anchor)
+        out.append(code[pos:end])
+        if replace_all or inserted == 0:
+            seg = ""
+            if not anchor.endswith("\n") and not new_code.startswith("\n"):
+                seg += "\n"
+            seg += new_code
+            if not new_code.endswith("\n") and code[end:end + 1] != "\n":
+                seg += "\n"
+            out.append(seg)
+            inserted += 1
+            if not replace_all:
+                out.append(code[end:])
+                break
+        pos = end
+    return "".join(out), count, None
+
+
+DIFF_LIMIT = 200
+
+
+def _make_diff(before: str, after: str):
+    """生成 unified diff（3 行上下文），返回 (diff_text, truncated)。"""
+    diff = list(difflib.unified_diff(
+        before.splitlines(), after.splitlines(),
+        fromfile="before", tofile="after", lineterm="", n=3))
+    truncated = len(diff) > DIFF_LIMIT
+    if truncated:
+        diff = diff[:DIFF_LIMIT]
+    text = "\n".join(diff)
+    if truncated:
+        text += f"\n... (diff 截断，仅显示前 {DIFF_LIMIT} 行)"
+    return text, truncated
+
+
+def _finish(file_path, encoding, newline, action, count, count_key, new_src,
+            before=None, dry_run=False):
+    """写回前备份，再落盘；返回摘要 + 变更 diff（不含全量源码，省 token）。
+
+    before 为修改前内容时附带 unified diff；dry_run=True 时只回显 diff 不落盘。
+    """
+    payload = {"action": action, "file_path": file_path, count_key: count}
+    if before is not None:
+        text, truncated = _make_diff(before, new_src)
+        payload["diff"] = text
+        if truncated:
+            payload["diff_truncated"] = True
+    if dry_run:
+        payload["written"] = False
+        payload["dry_run"] = True
+        return ok(payload)
     bak, berr = backup_file(file_path)
     if berr:
         return error(berr, code="io_error")
     werr = write_file(file_path, new_src, encoding, newline)
     if werr:
         return error(werr, code="io_error")
-    return ok({"action": action, "file_path": file_path, "written": True,
-               "backup": bak, count_key: count})
+    payload["written"] = True
+    payload["backup"] = bak
+    return ok(payload)
 
 
 def script_editor(action: str = None, file_path: str = None, url: str = None,
                   language: str = None, symbol=None, pattern: str = None,
                   start_line: int = None, end_line: int = None, limit: int = DEFAULT_LIMIT,
-                  old_code: str = None, new_code: str = None, replace_all: bool = False) -> str:
+                  old_code: str = None, new_code: str = None, replace_all: bool = False,
+                  dry_run: bool = False) -> str:
     """脚本编辑 + 结构化读取工具（对齐 OpenViking / DSH 规范信封）。
 
     数据来源（二选一）：file_path（本地文件，可写）或 url（http/https，只读）。
@@ -795,6 +894,7 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
     - add     : 在 old_code 之后插入 new_code；old_code 省略则追加到末尾
     - edit    : 用 new_code 精确替换 old_code
     - delete  : 删除 old_code
+    写入动作（add/edit/delete）默认回显 unified diff；dry_run=true 时只回显 diff 不落盘。
     """
     act = (action or "").strip().lower()
     new_code = new_code if new_code is not None else ""
@@ -869,20 +969,23 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
             new_src, err = _replace_lines(code, _as_int(start_line), _as_int(end_line), "")
             if err:
                 return error(err, code="bad_range")
-            return _finish(file_path, encoding, newline, "delete", 1, "replaced", new_src)
+            return _finish(file_path, encoding, newline, "delete", 1, "replaced", new_src,
+                           before=code, dry_run=dry_run)
         if not old_code:
             return error("delete 需要提供 old_code 或 start_line", code="missing_argument")
         new_src, count, err = _replace(code, old_code, "", replace_all)
         if err:
             return error(err, code="not_found")
-        return _finish(file_path, encoding, newline, "delete", count, "replaced", new_src)
+        return _finish(file_path, encoding, newline, "delete", count, "replaced", new_src,
+                       before=code, dry_run=dry_run)
 
     if act == "edit":
         if line_mode:
             new_src, err = _replace_lines(code, _as_int(start_line), _as_int(end_line), new_code)
             if err:
                 return error(err, code="bad_range")
-            return _finish(file_path, encoding, newline, "edit", 1, "replaced", new_src)
+            return _finish(file_path, encoding, newline, "edit", 1, "replaced", new_src,
+                           before=code, dry_run=dry_run)
         if not old_code:
             return error("edit 需要提供 old_code 或 start_line", code="missing_argument")
         if new_code == old_code:
@@ -890,7 +993,8 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
         new_src, count, err = _replace(code, old_code, new_code, replace_all)
         if err:
             return error(err, code="not_found")
-        return _finish(file_path, encoding, newline, "edit", count, "replaced", new_src)
+        return _finish(file_path, encoding, newline, "edit", count, "replaced", new_src,
+                       before=code, dry_run=dry_run)
 
     # add
     if not new_code:
@@ -899,12 +1003,18 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
         new_src, err = _insert_after_line(code, _as_int(start_line), new_code)
         if err:
             return error(err, code="bad_range")
-        return _finish(file_path, encoding, newline, "add", 1, "inserted", new_src)
+        if not new_src.endswith("\n"):
+            new_src += "\n"
+        return _finish(file_path, encoding, newline, "add", 1, "inserted", new_src,
+                       before=code, dry_run=dry_run)
     if not old_code:
-        sep = "" if code.endswith("\n") else "\n"
+        sep = "" if code.endswith("\n") or new_code.startswith("\n") else "\n"
         new_src, count = code + sep + new_code, 1
+        if not new_src.endswith("\n"):
+            new_src += "\n"
     else:
-        new_src, count, err = _replace(code, old_code, old_code + new_code, replace_all)
+        new_src, count, err = _add_after(code, old_code, new_code, replace_all)
         if err:
             return error(err, code="not_found")
-    return _finish(file_path, encoding, newline, "add", count, "inserted", new_src)
+    return _finish(file_path, encoding, newline, "add", count, "inserted", new_src,
+                   before=code, dry_run=dry_run)
