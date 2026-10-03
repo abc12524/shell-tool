@@ -27,6 +27,18 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 
+
+def _force_utf8(stream):
+    """强制标准流使用 UTF-8，避免 Windows 管道下 Rich 退化为 GBK/ASCII 导致乱码"""
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
+_force_utf8(sys.stdout)
+_force_utf8(sys.stderr)
+
 console = Console(highlight=False)
 
 

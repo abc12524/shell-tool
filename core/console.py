@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
 """全局 Rich Console 实例，供各模块统一使用"""
+import sys
+
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
+
+
+def _force_utf8(stream):
+    """强制标准流使用 UTF-8。
+
+    Windows 下当 stdout/stderr 被重定向到管道时，Python 默认用 locale 编码
+    （中文系统为 cp936/GBK），Rich 会据此输出 GBK 字节并退化为 ASCII 边框；
+    而 Server API 按 UTF-8 读取该管道，导致中文/边框部分乱码（格式化部分失效）。
+    统一改回 UTF-8，保证重定向与终端下渲染一致。
+    """
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
+_force_utf8(sys.stdout)
+_force_utf8(sys.stderr)
 
 console = Console(highlight=False)
 

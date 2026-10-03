@@ -94,9 +94,16 @@ def chat():
     cmd = [PYTHON, DEEPSEEK_PATH] + args + [question]
 
     try:
+        # 强制子进程以 UTF-8 输出：Windows 下管道默认 locale 编码(GBK)，
+        # 会让 Rich 边框/中文乱码；这里统一按 UTF-8 编码与解码。
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
+            cmd, capture_output=True, timeout=120,
             cwd=os.path.dirname(DEEPSEEK_PATH),
+            env=env, encoding="utf-8", errors="replace",
         )
         return jsonify({
             "status": "ok",
@@ -127,6 +134,9 @@ def chat_stream():
     def generate():
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        # Windows 管道默认 locale(GBK) 编码会使 Rich 中文/边框乱码，统一 UTF-8
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         cmd = [PYTHON, DEEPSEEK_PATH] + args + [question]
 
         # start_new_session：让子进程成为独立进程组 leader，断开时能干净回收
