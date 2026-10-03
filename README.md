@@ -28,11 +28,11 @@ shell-tool/
 │       ├── system_tools.py   # 系统信息 / 命令执行（原生 tool）
 │       ├── skill_tool.py     # skill 注册表：扫描 skill/ 头部自动注册 + 分发执行
 │       ├── ov_tools.py       # OpenViking 记忆底层实现（含自动召回/捕获等生命周期逻辑）
-│       ├── script_tools.py   # 脚本/代码编辑底层实现
 │       └── __init__.py       # 原生工具 schema（get_system_info/execute_system_command/skill）+ 分发器
 ├── skill/                    # skill 脚本目录：按头部标准结构自动注册
 │   ├── ov.py                 # skill: ov           —— OpenViking 记忆统一入口
 │   ├── script.py             # skill: script       —— 脚本/代码增删改查
+│   ├── _script_impl.py       # script 助手实现（`_` 开头，不注册）
 │   └── baidu_search.py       # skill: baidu_search —— 百度搜索 / 百科（千帆，进程内直连）
 ├── server/
 │   └── api.py                # Flask HTTP API（同步 + SSE 流式）

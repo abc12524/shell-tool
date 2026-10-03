@@ -11,7 +11,7 @@
 #   delete : 删除 old_code
 #   写入动作默认返回 unified diff；dry_run=true 只回显 diff 不落盘
 #   示例: {"action": "read", "file_path": "core/main.py", "symbol": "parse_args"}
-from core.tools.script_tools import script_editor
+from ._script_impl import script_editor
 
 
 def run(arguments):

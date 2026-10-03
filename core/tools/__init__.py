@@ -2,7 +2,7 @@
 """工具包：原生 function 工具（系统信息 / 命令执行 / skill 合集）+ 工具调用分发器
 
 tool 层只保留与运行环境强相关的少量原生工具；ov（OpenViking 记忆）、
-script（脚本/代码编辑）、search（百度搜索）等一律下沉为 skill/ 目录下的脚本，
+script（脚本/代码编辑）、baidu_search（百度搜索）等一律下沉为 skill/ 目录下的脚本，
 由 skill_tool 扫描脚本头部自动注册并在进程内执行。
 """
 import asyncio
@@ -11,7 +11,7 @@ import re
 
 from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
-from .skill_tool import skill_tool
+from .skill_tool import skill_tool, list_skills
 from .. import config
 
 __all__ = [
@@ -25,6 +25,10 @@ __all__ = [
 
 # 工具定义列表（符合 OpenAI/DeepSeek 的 tool 格式）
 # 原生 tool：系统信息 / 命令执行 / skill 统一入口（skill 列表由 skill/ 目录自动注册）。
+# skill 名称与说明摘要由注册表运行时生成，新增脚本即自动出现在工具描述中。
+_SKILL_SUMMARY = "、".join(f"{name}={desc}" for name, desc in list_skills().items()) or "(空)"
+_SKILL_NAMES = " / ".join(list_skills()) or "(空)"
+
 TOOLS = [
     {
         "type": "function",
@@ -60,8 +64,7 @@ TOOLS = [
         "function": {
             "name": "skill",
             "description": (
-                "skill 合集（由 skill/ 目录脚本自动注册）：ov=OpenViking 记忆、"
-                "script=脚本/代码增删改查、baidu_search=百度搜索。"
+                f"skill 合集（由 skill/ 目录脚本自动注册）：{_SKILL_SUMMARY}。"
                 "all=true 列出所有 skill 及说明；skill='名称' 查看用法；"
                 "skill='名称' 并传 arguments={参数} 执行。"
             ),
@@ -74,7 +77,7 @@ TOOLS = [
                     },
                     "skill": {
                         "type": "string",
-                        "description": "要查询或执行的 skill 名称，如 ov / script / baidu_search"
+                        "description": f"要查询或执行的 skill 名称，如 {_SKILL_NAMES}"
                     },
                     "arguments": {
                         "type": "object",

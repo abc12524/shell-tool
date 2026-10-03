@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from .envelope import ok, error
+from core.tools.envelope import ok, error
 
 
 # ============================ 结构解析（供 outline） ============================
