@@ -5,7 +5,7 @@
   start                 会话开始
   content {id,content}  正文增量（Markdown 渲染）
   reasoning {id,content} 思考过程增量（暗色斜体，与正文区分）
-  status {id,content}   诊断信息（状态行/工具调用日志/token 用量，暗色输出）
+  status {id,content}   诊断信息（状态行/工具调用日志/token 用量）
   error  {error,code}   出错，客户端以此非零退出
   done                  正常结束
   以 ':' 开头的注释行（含 ": heartbeat"）忽略
@@ -63,7 +63,7 @@ class Renderer:
 
     - reasoning → 暗色斜体（思考过程，与正文区分）
     - content   → Markdown 正文
-    - status    → 诊断信息（状态行 / 工具调用日志 / token 用量表）
+    - status    → 诊断信息（状态行 / 工具调用日志 / token 用量表），正常亮度输出
     思考与正文各用独立 Live 区，切换时旧区定格保留，因此两者视觉上可区分。
     """
 
@@ -107,7 +107,7 @@ class Renderer:
         if had_live:
             console.print()  # 定格 Live 后换行，避免诊断信息贴在正文末行
         if text:
-            console.print(Text(text, style="dim"), end="")
+            console.print(Text(text), end="")
 
     def finish(self):
         self._stop_live()
