@@ -3,10 +3,15 @@
 
 SSE 规范事件（data: <json>\n\n）：
   {"type":"start"}                 会话开始
-  {"type":"content","id":N,"content":"..."}  正文增量（思考/回答统一为文本流）
+  {"type":"content","id":N,"content":"..."}    正文增量（Markdown）
+  {"type":"reasoning","id":N,"content":"..."}  思考过程增量
+  {"type":"status","id":N,"content":"..."}     诊断信息（状态行/工具调用/用量）
   {"type":"error","error":"...","code":"..."} 出错（客户端应非零退出）
   {"type":"done"}                  正常结束
   以 ':' 开头的行（如 ": heartbeat"）为注释/心跳，客户端忽略
+
+子进程（DP_API_MODE=1）stdout 为一行一个 JSON 事件：{"t":"content|reasoning|note","d":"..."}，
+本模块按行解析后映射为上面的 SSE 事件；非 JSON 行按正文兜底。
 
 注：Windows 上 select 仅支持 socket，不支持管道，故用线程 + 队列读取子进程
 stdout；同时单独 drain stderr，避免双管道缓冲区打满造成死锁。
@@ -51,6 +56,36 @@ def _sse(event_type, **fields):
     payload = {"type": event_type}
     payload.update(fields)
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# 子进程事件类型 → SSE 事件类型
+_CHILD_EVENT_MAP = {"content": "content", "reasoning": "reasoning", "note": "status"}
+
+
+def _parse_child_line(line):
+    """解析子进程 stdout 的一行：结构化事件返回 (kind, data)，否则原样当正文"""
+    try:
+        evt = json.loads(line)
+    except (ValueError, TypeError):
+        return "content", line
+    if isinstance(evt, dict) and "t" in evt:
+        return evt.get("t", "content"), evt.get("d", "")
+    return "content", line
+
+
+def _child_event_to_sse(line, event_id):
+    """把子进程一行结构化事件转成对应的 SSE 事件块"""
+    kind, data = _parse_child_line(line)
+    return _sse(_CHILD_EVENT_MAP.get(kind, "content"), id=event_id, content=data)
+
+
+def _child_stdout_to_text(raw):
+    """把子进程结构化 stdout 还原成纯文本（供同步 /chat 接口）"""
+    parts = []
+    for line in raw.splitlines():
+        _, data = _parse_child_line(line)
+        parts.append(data)
+    return "".join(parts)
 
 
 def _reap(process):
@@ -112,7 +147,7 @@ def chat():
             "status": "ok",
             "result": {
                 "question": question,
-                "reply": result.stdout,
+                "reply": _child_stdout_to_text(result.stdout),
                 "error": error,
             },
         })
@@ -160,20 +195,27 @@ def chat_stream():
 
         def pump_stdout():
             # 逐字节读取：管道 read(n) 在 Windows 上会一直阻塞到凑满 n 字节，
-            # 用 read(1) 才能让每个 token 立刻上屏，避免 4KB 缓冲造成的流式卡顿。
+            # 用 read(1) 才能让每个事件立刻上屏，避免 4KB 缓冲造成的流式卡顿。
+            # 子进程在 API 模式下一行一个 JSON 事件，按行切分后 put 到队列。
             fd = process.stdout.fileno()
             dec = codecs.getincrementaldecoder("utf-8")("replace")
+            buf = ""
             try:
                 while True:
                     chunk = os.read(fd, 1)
                     if not chunk:
                         break
                     text = dec.decode(chunk)
-                    if text:
-                        q.put(text)
+                    if not text:
+                        continue
+                    buf += text
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        q.put(line)
                 rest = dec.decode(b"", final=True)
-                if rest:
-                    q.put(rest)
+                buf += rest
+                if buf:
+                    q.put(buf)
             except Exception:
                 pass
             finally:
@@ -220,7 +262,7 @@ def chat_stream():
                 break
             if item:
                 event_id += 1
-                yield _sse("content", id=event_id, content=item)
+                yield _child_event_to_sse(item, event_id)
 
         t_out.join(timeout=2)
         t_err.join(timeout=2)
