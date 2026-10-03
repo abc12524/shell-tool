@@ -104,6 +104,25 @@ def resolve_session(new_flag, sid):
     return session_id, False
 
 
+def local_time_str(dt, fmt='%Y-%m-%d %H:%M:%S'):
+    """把库中时间（SQLite CURRENT_TIMESTAMP 存的是 UTC）转成本地时区字符串。
+
+    兼容 datetime / ISO 字符串 / None；无法解析时原样返回。
+    """
+    if dt is None:
+        return ''
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except ValueError:
+            return dt
+    if not hasattr(dt, 'strftime'):
+        return str(dt)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().strftime(fmt)
+
+
 def print_recent_sessions(limit=5):
     """列出最近若干条会话（供 -s 无参数查看）"""
     sessions = db.list_recent_sessions(limit)
@@ -113,8 +132,7 @@ def print_recent_sessions(limit=5):
     active_id = db.get_active_session_id()
     rows = []
     for s in sessions:
-        when = s['updated_at']
-        when = when.strftime('%Y-%m-%d %H:%M:%S') if hasattr(when, 'strftime') else str(when)
+        when = local_time_str(s['updated_at'])
         status_txt = "活跃" if s['status'] == 'active' else "已结束"
         mark = " ●" if s['id'] == active_id else ""
         rows.append((s['id'], f"{status_txt} · {when} · {s['n']} 条消息{mark}"))
@@ -219,7 +237,7 @@ async def _async_main():
     # system prompt 固定在最前（时间戳用会话创建时间，跨轮稳定）
     sess_info = db.get_session_info(session_id)
     created_at = sess_info['created_at'] if sess_info else None
-    now_str = time.strftime('%a %b %d %H:%M:%S %Y', created_at.timetuple()) if created_at else time.ctime()
+    now_str = local_time_str(created_at, '%a %b %d %H:%M:%S %Y') if created_at else time.ctime()
     system_prompt = build_system_prompt(now_str)
 
     # 当前问题先入库（作为历史的一部分）
