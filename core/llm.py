@@ -93,9 +93,11 @@ def to_responses_tools(tools):
 def to_chat_messages(messages):
     """将内部聊天格式消息规整为 Chat Completions 请求消息。
 
-    - 丢弃 Responses 专属字段（output_items），以及 reasoning_content
-      （DeepSeek 等 OpenAI 兼容接口不接受回传思考内容）
+    - 丢弃 Responses 专属字段（output_items）
     - 保留 user/system/assistant(含 tool_calls)/tool 的聊天结构，无需转换协议
+    - assistant 的 reasoning_content 需原样回传：请求携带 tools 时，DeepSeek 思考模式
+      要求历史轮次的 reasoning_content 完整回传，否则返回 400
+      （见官方 thinking_mode#tool-calls）；未携带 tools 时该字段会被 API 忽略
     """
     out = []
     for m in messages:
@@ -104,6 +106,9 @@ def to_chat_messages(messages):
             out.append({"role": role, "content": m.get('content') or ''})
         elif role == 'assistant':
             msg = {"role": "assistant", "content": m.get('content') or ''}
+            reasoning_content = m.get('reasoning_content')
+            if reasoning_content:
+                msg['reasoning_content'] = reasoning_content
             tool_calls = m.get('tool_calls') or []
             if tool_calls:
                 serialized = []
