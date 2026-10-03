@@ -61,7 +61,7 @@ TOOLS = [
             "name": "skill",
             "description": (
                 "skill 合集（由 skill/ 目录脚本自动注册）：ov=OpenViking 记忆、"
-                "script=脚本/代码增删改查、search=百度搜索。"
+                "script=脚本/代码增删改查、baidu_search=百度搜索。"
                 "all=true 列出所有 skill 及说明；skill='名称' 查看用法；"
                 "skill='名称' 并传 arguments={参数} 执行。"
             ),
@@ -74,7 +74,7 @@ TOOLS = [
                     },
                     "skill": {
                         "type": "string",
-                        "description": "要查询或执行的 skill 名称，如 ov / script / search"
+                        "description": "要查询或执行的 skill 名称，如 ov / script / baidu_search"
                     },
                     "arguments": {
                         "type": "object",
@@ -88,7 +88,7 @@ TOOLS = [
 ]
 
 
-# DeepSeek Responses API 内置 web 搜索工具（服务端自动执行，区别于 skill 里的 search）。
+# DeepSeek Responses API 内置 web 搜索工具（服务端自动执行，区别于 skill 里的 baidu_search）。
 # 由 .env 的 LLM_WEB_SEARCH 控制开关；关闭后模型不再被提供该能力。
 if config.LLM_WEB_SEARCH:
     TOOLS.append({"type": "web_search"})

@@ -15,7 +15,7 @@
   - 读文件**最前面连续的 `#` 注释行**（头部），符合规范即注册；
   - 未声明 `# skill:` 的脚本不注册（可作被 import 的助手模块）。
 - 执行时按需 `importlib` 导入 `skill.<文件名>` 并调用其 `run(arguments)`，**进程内运行**。
-- 一个脚本 = 一个 skill（`ov` / `script` / `search` 就是这样各占一项）。
+- 一个脚本 = 一个 skill（`ov` / `script` / `baidu_search` 就是这样各占一项）。
 
 ---
 
