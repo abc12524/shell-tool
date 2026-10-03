@@ -13,6 +13,7 @@
 启动时注册表为空，全部由 skill/ 目录下的脚本自动添加。
 """
 import importlib
+import json
 import os
 import re
 import sys
@@ -21,6 +22,9 @@ from .envelope import ok, error
 from .. import config
 
 SKILL_DIR = os.path.join(config.PROJECT_ROOT, "skill")
+# 注册表缓存：按 (mtime, size) 指纹复用，文件未变化时不再打开脚本解析头部
+CACHE_PATH = os.path.join(config.PROJECT_ROOT, "data", "skill_registry.json")
+_CACHE_VERSION = 1
 
 _SKILL_RE = re.compile(r'^#\s*skill\s*:\s*(\S+)\s*$', re.I)
 _DESC_RE = re.compile(r'^#\s*description\s*:\s*(.*)$', re.I)
@@ -77,17 +81,101 @@ def _parse_skill_header(path):
     }
 
 
+def _fingerprint(path):
+    """返回文件的 (mtime, size) 指纹；读取失败返回 None。"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return {"mtime": st.st_mtime, "size": st.st_size}
+
+
+def _load_cache():
+    """读取缓存文件；版本不符或缺损时返回空 dict（触发全量扫描）。"""
+    try:
+        with open(CACHE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != _CACHE_VERSION:
+        return {}
+    files = data.get("files")
+    return files if isinstance(files, dict) else {}
+
+
+def _save_cache(files):
+    """原子写回缓存；失败静默（下次仍可全量扫描，不影响功能）。"""
+    try:
+        os.makedirs(os.path.dirname(CACHE_PATH) or ".", exist_ok=True)
+        tmp = CACHE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": _CACHE_VERSION, "files": files}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CACHE_PATH)
+    except OSError:
+        pass
+
+
+def _meta_from_cache(entry_meta, path, module):
+    """由缓存条目重建 meta（补齐不入缓存的 path/module）。"""
+    if not entry_meta:
+        return None
+    return {
+        "name": entry_meta.get("name"),
+        "description": entry_meta.get("description", ""),
+        "usage": entry_meta.get("usage", ""),
+        "path": path,
+        "module": module,
+    }
+
+
+def _meta_to_cache(meta):
+    """取 meta 中可持久化的最小字段集；无 skill 头返回 None（一并缓存，避免重复读取）。"""
+    if not meta:
+        return None
+    return {"name": meta["name"], "description": meta["description"], "usage": meta["usage"]}
+
+
 def _scan():
-    """扫描 skill/ 目录，返回 name -> meta；目录不存在或为空时返回空注册表。"""
+    """扫描 skill/ 目录，返回 name -> meta。
+
+    结果按文件 (mtime, size) 指纹缓存到 data/skill_registry.json：文件未变化时
+    直接复用缓存、不再打开脚本解析头部；新增/修改/删除都会只重解析受影响文件并
+    原子写回缓存。缓存缺失/损坏时自动退化为全量扫描。
+    """
     registry = {}
     if not os.path.isdir(SKILL_DIR):
         return registry
+
+    cached = _load_cache()
+    files = {}
+    changed = False
+
     for fn in sorted(os.listdir(SKILL_DIR)):
         if not fn.endswith(".py") or fn.startswith("_"):
             continue
-        meta = _parse_skill_header(os.path.join(SKILL_DIR, fn))
+        path = os.path.join(SKILL_DIR, fn)
+        module = "skill." + os.path.splitext(fn)[0]
+        fp = _fingerprint(path)
+        if fp is None:
+            continue
+
+        entry = cached.get(fn)
+        if entry and entry.get("mtime") == fp["mtime"] and entry.get("size") == fp["size"]:
+            # 指纹命中：复用缓存，不打开文件
+            cached_meta = entry.get("meta")
+            meta = _meta_from_cache(cached_meta, path, module)
+            files[fn] = {"mtime": fp["mtime"], "size": fp["size"], "meta": cached_meta}
+        else:
+            meta = _parse_skill_header(path)
+            files[fn] = {"mtime": fp["mtime"], "size": fp["size"], "meta": _meta_to_cache(meta)}
+            changed = True
+
         if meta:
             registry[meta["name"]] = meta
+
+    if changed or files != cached:
+        _save_cache(files)
+
     return registry
 
 
