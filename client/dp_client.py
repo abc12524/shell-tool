@@ -29,9 +29,15 @@ from rich.markdown import Markdown
 
 
 def _force_utf8(stream):
-    """强制标准流使用 UTF-8，避免 Windows 管道下 Rich 退化为 GBK/ASCII 导致乱码"""
+    """强制标准流使用 UTF-8，避免 Windows 管道下 Rich 退化为 GBK/ASCII 导致乱码。
+
+    管道下同时关闭 \\n -> \\r\\n 翻译，防止下游再次消费时把 CR 当行内字符。
+    """
     try:
-        stream.reconfigure(encoding="utf-8", errors="replace")
+        if stream.isatty():
+            stream.reconfigure(encoding="utf-8")
+        else:
+            stream.reconfigure(encoding="utf-8", newline="\n")
     except (AttributeError, ValueError, OSError):
         pass
 
@@ -40,6 +46,14 @@ _force_utf8(sys.stdout)
 _force_utf8(sys.stderr)
 
 console = Console(highlight=False)
+
+
+def _normalize_newlines(text: str) -> str:
+    """统一换行：CRLF / CR -> LF。
+
+    Rich 的 Markdown 只认 LF 作块分隔，直接喂入 CRLF 会把多行挤成一行。
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 class LiveMarkdown:
@@ -57,6 +71,7 @@ class LiveMarkdown:
 
     def feed(self, delta: str):
         if delta:
+            delta = _normalize_newlines(delta)
             self._buf.append(delta)
             self._live.update(Markdown("".join(self._buf)))
 
