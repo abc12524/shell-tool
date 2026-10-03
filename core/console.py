@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """全局 Rich Console 实例，供各模块统一使用"""
+import os
 import sys
 
 from rich.console import Console
@@ -7,6 +8,13 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
+
+# API 模式：由 server/api.py 注入 DP_API_MODE=1，表示本进程 stdout 会被 SSE
+# 客户端当作"模型正文"消费。此时所有诊断/状态输出改走 stderr，只把模型正文
+# 留在 stdout，避免状态日志被当作回答内容渲染导致格式错乱。
+_API_MODE = os.environ.get("DP_API_MODE") == "1"
+# 在重定向前保存真正的 stdout 作为正文通道
+_CONTENT_STREAM = sys.stdout
 
 
 def _force_utf8(stream):
@@ -29,8 +37,13 @@ def _force_utf8(stream):
         pass
 
 
-_force_utf8(sys.stdout)
+_force_utf8(_CONTENT_STREAM)
 _force_utf8(sys.stderr)
+
+# API 模式下把 sys.stdout 指向 stderr：此后所有 print()/rich console.print()
+# 等诊断输出都进 stderr，只有 LiveMarkdown/LiveReasoning 的正文写入 _CONTENT_STREAM
+if _API_MODE:
+    sys.stdout = sys.stderr
 
 console = Console(highlight=False)
 
@@ -62,8 +75,8 @@ class LiveMarkdown:
             return
         self._buf.append(delta)
         if self._passthrough:
-            sys.stdout.write(delta)
-            sys.stdout.flush()
+            _CONTENT_STREAM.write(delta)
+            _CONTENT_STREAM.flush()
         else:
             self._live.update(Markdown("".join(self._buf)))
 
@@ -102,8 +115,8 @@ class LiveReasoning:
             return
         self._buf.append(delta)
         if self._passthrough:
-            sys.stdout.write(delta)
-            sys.stdout.flush()
+            _CONTENT_STREAM.write(delta)
+            _CONTENT_STREAM.flush()
         else:
             self._live.update(Text("".join(self._buf), style="dim italic"))
 
@@ -111,6 +124,10 @@ class LiveReasoning:
         if self._live:
             self._live.stop()
             self._live = None
+        if self._passthrough and self._buf:
+            # 思考过程与正文之间补一个空行，避免两段文字在 Markdown 里粘成一行
+            _CONTENT_STREAM.write("\n\n")
+            _CONTENT_STREAM.flush()
         return "".join(self._buf)
 
 

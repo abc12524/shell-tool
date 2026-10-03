@@ -100,17 +100,20 @@ def chat():
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        env["DP_API_MODE"] = "1"
         result = subprocess.run(
             cmd, capture_output=True, timeout=120,
             cwd=os.path.dirname(DEEPSEEK_PATH),
             env=env, encoding="utf-8", errors="replace",
         )
+        # DP_API_MODE 下 stderr 是诊断日志（非错误）；仅在进程失败时当作错误返回
+        error = (result.stderr or "").strip() if result.returncode != 0 else None
         return jsonify({
             "status": "ok",
             "result": {
                 "question": question,
                 "reply": result.stdout,
-                "error": result.stderr or None,
+                "error": error,
             },
         })
     except subprocess.TimeoutExpired:
@@ -137,6 +140,8 @@ def chat_stream():
         # Windows 管道默认 locale(GBK) 编码会使 Rich 中文/边框乱码，统一 UTF-8
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        # 告知子进程：stdout 会被当作模型正文转发，诊断输出请走 stderr
+        env["DP_API_MODE"] = "1"
         cmd = [PYTHON, DEEPSEEK_PATH] + args + [question]
 
         # start_new_session：让子进程成为独立进程组 leader，断开时能干净回收
