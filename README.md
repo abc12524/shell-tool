@@ -156,6 +156,33 @@ curl -N -X POST http://localhost:8000/chat/stream \
 curl http://localhost:8000/health
 ```
 
+#### 流式事件协议（供自建客户端 / 移动端）
+
+服务端只发「变化的数据」，展示格式（emoji / 颜色 / 表格）由客户端自行构建；`client/dp_client.py` 即参考实现。`/chat/stream` 的 SSE `data:` 为 JSON，均带 `type`：
+
+| type | 关键字段 | 说明 |
+|------|----------|------|
+| `start` / `done` | — | 会话开始 / 正常结束 |
+| `content` | `content` | 正文增量（Markdown） |
+| `reasoning` | `content` | 思考过程增量 |
+| `question` | `text` | 用户问题回显 |
+| `db` | `online` | 数据库模式 |
+| `session` | `action`(new/resume/saved), `id` | 会话状态 |
+| `memory` | `phase`(profile/recall), `found` | 记忆加载 / 召回 |
+| `config` | `keys` | `-k`/`-m` 更新的 .env 项 |
+| `reasoning_header` | — | 思考过程分隔 |
+| `tool_round` | `index`, `local`, `search` | 工具轮次 |
+| `continuing` | `index` | 继续推理 |
+| `tool_call` | `name`, `arguments`, `id`, `parse_error` | 工具调用 |
+| `tool_result` | `name`, `id`, `output`, `truncated`, `error` | 工具结果（output 截断至 2000 字符） |
+| `search` | `state`, `id`, `first` | 服务端网页搜索 |
+| `warning` | `message`, `code` | 警告 |
+| `usage` | `model`,`peak`,`hit`,`miss`,`out`,`cost_*`,`total`,`balance`,`currency` | token / 费用 / 余额 |
+| `log` | `text` | 未结构化输出的兜底 |
+| `error` | `error`, `code` | 出错（客户端应非零退出） |
+
+`:` 开头的行为注释 / 心跳，忽略。
+
 ## 工具调用流程
 
 对话开始时批量并行执行模型请求的全部工具调用，结果一次性回传后直接输出最终回答；若模型在最终轮仍请求调用工具，在 `MAX_TOOL_ROUNDS` 预算内可再执行，超出则强制基于已有结果作答。所有工具统一返回规范信封 `{"status":"ok","result":{...}}` / `{"status":"error","error":...}`，与 OpenViking 后端及 DSH 会话格式保持一致。

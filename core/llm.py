@@ -11,7 +11,8 @@ from types import SimpleNamespace
 
 from . import db
 from . import config
-from .console import console, LiveMarkdown, LiveReasoning, render_table
+from . import events
+from .console import LiveMarkdown, LiveReasoning
 from .tools import TOOLS, process_tool_calls
 from .tools.ov_tools import openviking_load_context, wrap_recall_block, openviking_capture
 
@@ -186,13 +187,11 @@ async def stream_responses_api(client, messages):
                     'arguments': '',
                 }
             elif getattr(item, 'type', None) == 'web_search_call':
-                if not search_header_shown:
-                    console.print("\n🔎 服务端网页搜索：", style="bold cyan")
-                    search_header_shown = True
-                console.print(f"  - 搜索调用 {getattr(item, 'id', '')} 已发起", style="cyan")
+                events.ev_search("call", getattr(item, 'id', ''), first=not search_header_shown)
+                search_header_shown = True
 
         elif ctype.startswith('response.web_search_call.'):
-            console.print(f"  - 搜索状态: {ctype.split('.')[-1]}", style="cyan")
+            events.ev_search(ctype.split('.')[-1])
 
         elif ctype == 'response.function_call_arguments.delta':
             idx = getattr(chunk, 'output_index', None)
@@ -213,8 +212,7 @@ async def stream_responses_api(client, messages):
                     # 思考结束，切换到 Markdown 渲染
                     live_reasoning.finish()
                     if reasoning:
-                        console.rule("[dim]🤔 思考过程[/dim]")
-                        console.print()
+                        events.ev_reasoning_header()
                     live_md = LiveMarkdown().start()
                 live_md.feed(delta)
 
@@ -365,8 +363,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
             forced_final = True
             break
 
-        print("\n" + "=" * 30)
-        console.print(f"🔧 执行工具 (第{tool_rounds}轮): {len(tool_calls)} 个本地调用 / {len(web_search_calls)} 个服务端搜索", style="bold yellow")
+        events.ev_tool_round(tool_rounds, len(tool_calls), len(web_search_calls))
 
         # 一次并发执行本轮全部 function 调用（异步无同步屏障），结果一次性回传；
         # web_search_call 由服务端自动执行，仅随 assistant 消息原样回传供恢复结果
@@ -388,8 +385,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
             _persist(session_id, ov_session_id, [recall_msg])
 
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
-        print("\n" + "=" * 30)
-        console.print("🤔 继续推理...", style="dim italic")
+        events.ev_continuing(tool_rounds)
         content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
         total_usage = _add_usage(total_usage, usage)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
@@ -401,7 +397,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
             "role": "user",
             "content": "已达到工具调用次数上限，请不要再调用工具，直接基于已有信息给出最终回答。"
         }
-        console.print("\n⚠️  工具调用次数已达上限，强制基于已有结果给出最终回答", style="bold red")
+        events.ev_warning("工具调用次数已达上限，强制基于已有结果给出最终回答", code="max_tool_rounds")
         messages.append(force_msg)
         step_recall = openviking_load_context(messages, session_id=session_id)
         if step_recall:

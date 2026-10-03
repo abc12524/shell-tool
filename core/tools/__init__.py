@@ -13,6 +13,7 @@ from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
 from .skill_tool import skill_tool, list_skills
 from .. import config
+from .. import events
 
 __all__ = [
     "TOOLS",
@@ -155,15 +156,14 @@ async def _execute_single_tool(tool_call):
 
     arguments, err = _parse_tool_arguments(raw_args)
     if err:
-        print(f"⚠️ 工具 {function_name} 参数解析失败: {err}")
+        events.ev_tool_call(function_name, raw=raw_args, call_id=call_id, parse_error=err)
         return {
             "role": "tool",
             "tool_call_id": call_id,
             "content": f"Error: 工具 {function_name} 参数不是合法 JSON，无法执行 - {err}",
         }
 
-    print(f"🔧 执行工具: {function_name}")
-    print(f"📥 参数: {json.dumps(arguments, ensure_ascii=False)}")
+    events.ev_tool_call(function_name, arguments=arguments, call_id=call_id)
 
     # 执行对应函数（同步阻塞函数放到线程池，不阻塞事件循环）
     handler = TOOL_FUNCTIONS.get(function_name)
@@ -175,7 +175,7 @@ async def _execute_single_tool(tool_call):
     else:
         result_str = f"Error: 未知工具 {function_name}"
 
-    print(f"📤 结果: {result_str[:200]}{'...' if len(result_str) > 200 else ''}")
+    events.ev_tool_result(function_name, call_id, result_str)
 
     return {
         "role": "tool",

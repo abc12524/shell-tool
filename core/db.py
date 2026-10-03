@@ -17,6 +17,7 @@ import uuid
 import pymysql
 
 from .config import DB_CONFIG, DB_ONLINE, DB_CONFIGURED, SQLITE_DB_PATH
+from . import events
 
 # 是否已初始化；_sync_enabled 表示在线 MySQL 同步是否开启（SQLite 始终可用）
 _ready = False
@@ -42,7 +43,7 @@ def resolve_backend():
             _init_schema_mysql()
             _sync_enabled = True
         except Exception as e:
-            print(f"⚠️  在线 MySQL 不可用，仅使用本地 SQLite：{e}")
+            events.ev_warning(f"在线 MySQL 不可用，仅使用本地 SQLite：{e}", code="mysql_unavailable")
             _sync_enabled = False
     else:
         _sync_enabled = False
@@ -340,7 +341,8 @@ def _sync_pending():
                              [(m['id'],) for m in messages])
             conn.commit()
     except Exception as e:
-        print(f"⚠️  同步到在线 MySQL 失败（数据已安全保存于本地 SQLite，将在下次启动/写入时重试）：{e}")
+        events.ev_warning(f"同步到在线 MySQL 失败（数据已安全保存于本地 SQLite，将在下次启动/写入时重试）：{e}",
+                          code="mysql_sync_failed")
 
 
 # ============= 消息序列构建 =============

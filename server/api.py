@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Flask HTTP API：同步 /chat + SSE 流式 /chat/stream + /health
 
-SSE 规范事件（data: <json>\n\n）：
-  {"type":"start"}                 会话开始
-  {"type":"content","id":N,"content":"..."}    正文增量（Markdown）
-  {"type":"reasoning","id":N,"content":"..."}  思考过程增量
-  {"type":"status","id":N,"content":"..."}     诊断信息（状态行/工具调用/用量）
-  {"type":"error","error":"...","code":"..."} 出错（客户端应非零退出）
-  {"type":"done"}                  正常结束
+协议（服务端只转发“变化的数据”，展示格式由客户端自行构建）：
+  {"type":"start"}     会话开始
+  {"type":"done"}      正常结束
+  {"type":"error","error":"...","code":"..."}  出错（客户端应非零退出）
+  其余为语义事件，字段与 core/events.py 一一对应，例如：
+    {"type":"content","content":"..."}    正文增量
+    {"type":"reasoning","content":"..."}  思考过程增量
+    {"type":"tool_call","name":...,"arguments":...,"id":...}
+    {"type":"tool_result","name":...,"id":...,"output":...,"truncated":...}
+    {"type":"usage","model":...,"hit":...,"miss":...,"out":...,"total":...,"balance":...}
+    {"type":"question"/"db"/"session"/"memory"/"tool_round"/"continuing"/"warning"/"log", ...}
   以 ':' 开头的行（如 ": heartbeat"）为注释/心跳，客户端忽略
 
-子进程（DP_API_MODE=1）stdout 为一行一个 JSON 事件：{"t":"content|reasoning|note","d":"..."}，
-本模块按行解析后映射为上面的 SSE 事件；非 JSON 行按正文兜底。
+子进程（DP_API_MODE=1）stdout 为一行一个 JSON 事件 {"t":<type>,...}；
+本模块仅把 t 改名为 type 后原样转发，不理解具体格式。
 
 注：Windows 上 select 仅支持 socket，不支持管道，故用线程 + 队列读取子进程
 stdout；同时单独 drain stderr，避免双管道缓冲区打满造成死锁。
@@ -58,33 +62,37 @@ def _sse(event_type, **fields):
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-# 子进程事件类型 → SSE 事件类型
-_CHILD_EVENT_MAP = {"content": "content", "reasoning": "reasoning", "note": "status"}
+def _child_event_to_sse(line):
+    """子进程一行 -> SSE 事件块。
 
-
-def _parse_child_line(line):
-    """解析子进程 stdout 的一行：结构化事件返回 (kind, data)，否则原样当正文"""
+    子进程在 API 模式下输出 {"t":<type>, ...} 的语义事件；这里只做字段重命名
+    （t -> type）原样透传，不该由服务端理解具体格式。非 JSON 行兜底为 log 事件。
+    """
     try:
         evt = json.loads(line)
     except (ValueError, TypeError):
-        return "content", line
-    if isinstance(evt, dict) and "t" in evt:
-        return evt.get("t", "content"), evt.get("d", "")
-    return "content", line
-
-
-def _child_event_to_sse(line, event_id):
-    """把子进程一行结构化事件转成对应的 SSE 事件块"""
-    kind, data = _parse_child_line(line)
-    return _sse(_CHILD_EVENT_MAP.get(kind, "content"), id=event_id, content=data)
+        return _sse("log", text=line)
+    if not isinstance(evt, dict) or "t" not in evt:
+        return _sse("log", text=line)
+    fields = {k: v for k, v in evt.items() if k != "t"}
+    return _sse(evt["t"], **fields)
 
 
 def _child_stdout_to_text(raw):
-    """把子进程结构化 stdout 还原成纯文本（供同步 /chat 接口）"""
+    """把子进程语义事件 stdout 还原成纯文本（供同步 /chat 接口）"""
     parts = []
     for line in raw.splitlines():
-        _, data = _parse_child_line(line)
-        parts.append(data)
+        try:
+            evt = json.loads(line)
+        except (ValueError, TypeError):
+            parts.append(line)
+            continue
+        if not isinstance(evt, dict) or "t" not in evt:
+            parts.append(line)
+        elif evt["t"] in ("content", "reasoning"):
+            parts.append(evt.get("content", ""))
+        elif evt["t"] == "log":
+            parts.append(evt.get("text", ""))
     return "".join(parts)
 
 
@@ -246,7 +254,6 @@ def chat_stream():
         t_out.start()
         t_err.start()
 
-        event_id = 0
         yield _sse("start")
 
         while True:
@@ -261,8 +268,7 @@ def chat_stream():
             if item is None:  # EOF
                 break
             if item:
-                event_id += 1
-                yield _child_event_to_sse(item, event_id)
+                yield _child_event_to_sse(item)
 
         t_out.join(timeout=2)
         t_err.join(timeout=2)

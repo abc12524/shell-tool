@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-"""shell-tool 流式对话客户端：消费 /chat/stream 的 SSE 规范事件流。
+"""shell-tool 流式对话客户端：消费 /chat/stream 的语义事件流并渲染。
 
-事件类型（与服务端约定）：
-  start                 会话开始
-  content {id,content}  正文增量（Markdown 渲染）
-  reasoning {id,content} 思考过程增量（暗色斜体，与正文区分）
-  status {id,content}   诊断信息（状态行/工具调用日志/token 用量）
-  error  {error,code}   出错，客户端以此非零退出
-  done                  正常结束
-  以 ':' 开头的注释行（含 ": heartbeat"）忽略
+服务端只发送“变化的数据”，展示格式（emoji/颜色/表格）全部由本客户端构建——
+这里就是 Android 等客户端的参考实现。
+
+事件类型（与服务端约定，详见 core/events.py）：
+  start                                  会话开始
+  content   {content}                    正文增量（Markdown）
+  reasoning {content}                    思考过程增量（暗色斜体）
+  question  {text}                       用户问题回显
+  db        {online}                     数据库模式
+  session   {action,id}                  new/resume/saved
+  memory    {phase,found}                profile/recall
+  config    {keys}                       -k/-m 更新的 .env 项
+  reasoning_header {}                    思考过程分隔线
+  tool_round{index,local,search}         工具轮次
+  continuing{index}                      继续推理
+  tool_call {name,arguments,id,parse_error}
+  tool_result{name,id,output,truncated,error}
+  search    {state,id,first}             服务端网页搜索
+  warning   {message,code}
+  usage     {model,peak,hit,miss,out,cost_hit,cost_miss,cost_out,total,balance,currency}
+  log       {text}                       未结构化的兜底文本
+  error     {error,code}                 出错，客户端非零退出
+  done                                   正常结束
+  以 ':' 开头的行（含 ": heartbeat"）为注释/心跳，忽略
 
 用法：
   dp.py [-H 主机] [-P 端口] [-n] [-t 超时秒] [-k KEY] [-m MODEL] <问题...>
-  # 例：dp.py -H 192.168.30.181 "今天北京天气怎么样？"
-  #      dp.py -n "帮我写个脚本"
-  #      dp.py -m deepseek-v4-pro -k sk-xxx "问题"   # 覆盖服务端 .env 的模型/密钥
 环境变量 DP_HOST / DP_PORT / DP_TIMEOUT 可覆盖默认值。
 """
 import argparse
@@ -27,6 +40,7 @@ from urllib.error import HTTPError, URLError
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.table import Table
 from rich.text import Text
 
 
@@ -59,12 +73,10 @@ def _normalize_newlines(text: str) -> str:
 
 
 class Renderer:
-    """事件渲染器：按类型分别呈现
+    """语义事件渲染器。
 
-    - reasoning → 暗色斜体（思考过程，与正文区分）
-    - content   → Markdown 正文
-    - status    → 诊断信息（状态行 / 工具调用日志 / token 用量表），正常亮度输出
-    思考与正文各用独立 Live 区，切换时旧区定格保留，因此两者视觉上可区分。
+    正文(content)/思考(reasoning) 各用独立 Live 区流式刷新；其余事件定位格后
+    按固定格式打印。切换时旧 Live 定格保留，因此思考与正文视觉上可区分。
     """
 
     def __init__(self):
@@ -72,6 +84,7 @@ class Renderer:
         self._kind = None
         self._buf = []
 
+    # ---- Live 管理 ----
     def _stop_live(self):
         if self._live:
             self._live.stop()
@@ -87,7 +100,7 @@ class Renderer:
         self._live = Live(console=console, refresh_per_second=12, transient=False)
         self._live.start()
 
-    def feed(self, kind: str, delta: str):
+    def _feed(self, kind, delta):
         delta = _normalize_newlines(delta)
         if not delta:
             return
@@ -98,16 +111,98 @@ class Renderer:
         else:
             self._live.update(Markdown("".join(self._buf)))
 
-    def status(self, text: str):
-        # 诊断信息：先定格当前 Live（保留已显示的思考/正文），再按其下方输出，
-        # 避免诊断内容与正文重叠；后续若再有正文会另起一段重新渲染。
-        text = _normalize_newlines(text)
+    # ---- 普通输出 ----
+    def _print(self, renderable, end="\n"):
         had_live = self._live is not None
         self._stop_live()
         if had_live:
-            console.print()  # 定格 Live 后换行，避免诊断信息贴在正文末行
-        if text:
-            console.print(Text(text), end="")
+            console.print()
+        console.print(renderable, end=end)
+
+    def _line(self, text, style=None):
+        self._print(Text(text, style=style) if style else Text(text))
+
+    # ---- 各类事件 ----
+    def handle(self, etype, evt):
+        if etype == "content":
+            self._feed("content", evt.get("content", ""))
+        elif etype == "reasoning":
+            self._feed("reasoning", evt.get("content", ""))
+        elif etype == "question":
+            self._line(f"\n👤 用户问题: {evt.get('text', '')}")
+        elif etype == "db":
+            self._line("🗄️  本地 SQLite + 在线 MySQL 同步" if evt.get("online")
+                       else "🗄️  使用本地 SQLite 数据库")
+        elif etype == "session":
+            action, sid = evt.get("action"), evt.get("id", "")
+            if action == "new":
+                self._line(f"\n🆕 新会话: {sid}")
+            elif action == "resume":
+                self._line(f"\n↩️  继续会话: {sid}")
+            elif action == "saved":
+                self._line(f"\n✅ 对话已保存到会话: {sid}")
+        elif etype == "memory":
+            if evt.get("phase") == "profile":
+                self._line("🔍 加载记忆索引... " + ("完成" if evt.get("found") else "无"))
+            else:
+                self._line("🔍 搜索相关记忆... " + ("找到相关记忆，注入上下文" if evt.get("found") else "无相关记忆。"))
+        elif etype == "config":
+            self._line(f"⚙️  已更新 .env：{'、'.join(evt.get('keys', []))}")
+        elif etype == "reasoning_header":
+            self._print(Text("🤔 思考过程", style="dim"), end="\n")
+            self._print(Text("─" * 60, style="dim"), end="\n")
+        elif etype == "tool_round":
+            self._print(Text("=" * 30, style="dim"), end="\n")
+            self._line(f"🔧 执行工具 (第{evt.get('index')}轮): {evt.get('local')} 个本地调用 / {evt.get('search')} 个服务端搜索",
+                       style="bold yellow")
+        elif etype == "continuing":
+            self._print(Text("=" * 30, style="dim"), end="\n")
+            self._line("🤔 继续推理...", style="dim italic")
+        elif etype == "tool_call":
+            if evt.get("parse_error"):
+                self._line(f"⚠️ 工具 {evt.get('name')} 参数解析失败: {evt.get('parse_error')}", style="bold red")
+            else:
+                self._line(f"🔧 执行工具: {evt.get('name')}")
+                if evt.get("arguments") is not None:
+                    self._line(f"📥 参数: {json.dumps(evt.get('arguments'), ensure_ascii=False)}")
+        elif etype == "tool_result":
+            out = evt.get("output", "") or ""
+            preview = out[:200] + ("..." if len(out) > 200 else "")
+            self._line(f"📤 结果: {preview}")
+        elif etype == "search":
+            if evt.get("state") == "call":
+                if evt.get("first"):
+                    self._print(Text("\n🔎 服务端网页搜索：", style="bold cyan"), end="\n")
+                self._line(f"  - 搜索调用 {evt.get('id', '')} 已发起", style="cyan")
+            else:
+                self._line(f"  - 搜索状态: {evt.get('state')}", style="cyan")
+        elif etype == "warning":
+            self._line(f"⚠️  {evt.get('message', '')}", style="bold red")
+        elif etype == "usage":
+            self._usage(evt)
+        elif etype == "log":
+            self._print(Text(_normalize_newlines(evt.get("text", ""))), end="")
+        elif etype == "error":
+            self._print(Text(f"\n[错误] {evt.get('error', '')}", style="bold red"))
+
+    def _usage(self, evt):
+        period = "高峰时段" if evt.get("peak") else "空闲时段"
+        self._print(Text(f"\n⏰ {period}（北京时间 周一至周五 9:00-12:00、14:00-18:00）", style="bold"))
+        table = Table(show_header=False, border_style="dim")
+        table.add_column("Key", style="bold")
+        table.add_column("Value", style="cyan")
+        table.add_row("输入(缓存命中)", f"{evt.get('hit', 0):,} tokens  ¥{evt.get('cost_hit', 0):.4f}")
+        table.add_row("输入(缓存未命中)", f"{evt.get('miss', 0):,} tokens  ¥{evt.get('cost_miss', 0):.4f}")
+        table.add_row("输出", f"{evt.get('out', 0):,} tokens  ¥{evt.get('cost_out', 0):.4f}")
+        table.title = f"📊 Token 消耗统计 · {evt.get('model', '')} · 合计 ¥{evt.get('total', 0):.4f}"
+        self._print(table)
+        balance = evt.get("balance")
+        if balance is not None:
+            currency = evt.get("currency", "")
+            symbol = "¥" if currency == "CNY" else ""
+            self._print(Text(f"💰 账户余额：{symbol}{balance} {currency}".rstrip(), style="bold green"))
+        else:
+            self._line("💰 账户余额：查询失败", style="dim")
 
     def finish(self):
         self._stop_live()
@@ -145,19 +240,13 @@ def _handle_event(event_text, renderer):
         return 0  # 无法解析的片段忽略，继续
 
     etype = evt.get("type")
-    if etype == "content":
-        renderer.feed("content", evt.get("content", ""))
-    elif etype == "reasoning":
-        renderer.feed("reasoning", evt.get("content", ""))
-    elif etype == "status":
-        renderer.status(evt.get("content", ""))
-    elif etype == "error":
-        renderer.finish()
-        console.print(f"\n[bold red][错误][/bold red] {evt.get('error', '')}")
-        return 2
-    elif etype == "done":
+    if etype == "done":
         return 1
-    # start 等其它类型忽略
+    if etype == "error":
+        renderer.handle("error", evt)
+        return 2
+    if etype and etype != "start":
+        renderer.handle(etype, evt)
     return 0
 
 

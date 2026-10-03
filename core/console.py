@@ -47,27 +47,39 @@ def _force_utf8(stream):
 _EMIT_LOCK = threading.Lock()
 
 
-def _emit(kind: str, data: str):
-    """API 模式下向事件通道写一行 JSON；非 API 模式原样写文本"""
-    if _API_MODE:
-        try:
-            payload = json.dumps({"t": kind, "d": data}, ensure_ascii=False)
-            with _EMIT_LOCK:
-                _CONTENT_STREAM.write(payload + "\n")
-                _CONTENT_STREAM.flush()
-        except Exception:
-            pass
-    elif data:
+def emit(kind: str, **fields):
+    """API 模式：把一条结构化事件写成一行 JSON；终端/非 API 模式：不输出。
+
+    事件只携带“变化的数据”，展示格式（emoji/颜色/表格）由客户端自行构建。
+    """
+    if not _API_MODE:
+        return
+    payload = {"t": kind}
+    payload.update(fields)
+    try:
+        line = json.dumps(payload, ensure_ascii=False)
         with _EMIT_LOCK:
-            _CONTENT_STREAM.write(data)
+            _CONTENT_STREAM.write(line + "\n")
+            _CONTENT_STREAM.flush()
+    except Exception:
+        pass
+
+
+def _output(kind: str, text: str):
+    """正文/思考增量：API 模式发事件，否则原样写文本（重定向场景）"""
+    if _API_MODE:
+        emit(kind, content=text)
+    elif text:
+        with _EMIT_LOCK:
+            _CONTENT_STREAM.write(text)
             _CONTENT_STREAM.flush()
 
 
 class _DiagStream:
-    """API 模式下的诊断输出通道。
+    """API 模式下的兜底诊断通道。
 
-    print() / rich console.print() 都写到这里，转成 note 事件发给客户端，
-    使其仍能看到状态行、工具调用日志、token 用量表等信息。
+    任何未被显式结构化的 print()/rich 输出都会经此转成 log 事件，
+    保证既不会混进正文，也不会丢失。
     """
 
     encoding = "utf-8"
@@ -75,7 +87,7 @@ class _DiagStream:
 
     def write(self, text):
         if text:
-            _emit("note", text)
+            emit("log", text=text)
         return len(text) if text else 0
 
     def flush(self):
@@ -88,7 +100,7 @@ class _DiagStream:
 _force_utf8(_CONTENT_STREAM)
 _force_utf8(sys.stderr)
 
-# API 模式下把 sys.stdout 换成诊断通道（诊断 -> note 事件；正文走 _CONTENT_STREAM）
+# API 模式下把 sys.stdout 换成兜底诊断通道（未结构化输出 -> log 事件；正文走 _CONTENT_STREAM）
 if _API_MODE:
     sys.stdout = _DiagStream()
 
@@ -122,7 +134,7 @@ class LiveMarkdown:
             return
         self._buf.append(delta)
         if self._passthrough:
-            _emit("content", delta)
+            _output("content", delta)
         else:
             self._live.update(Markdown("".join(self._buf)))
 
@@ -161,7 +173,7 @@ class LiveReasoning:
             return
         self._buf.append(delta)
         if self._passthrough:
-            _emit("reasoning", delta)
+            _output("reasoning", delta)
         else:
             self._live.update(Text("".join(self._buf), style="dim italic"))
 
