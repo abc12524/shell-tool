@@ -153,8 +153,9 @@ def build_system_prompt(now_str=None):
         now_str = time.ctime()
     # 只列 skill 名称（说明由 skill 工具 schema 携带），让模型知道有哪些工具可调
     skill_names = "、".join(list_skills()) or "(空)"
+    """现在时间: {now_str} """
     return f"""You are a helpful assistant with access to system commands and a skill collection.
-当前运行环境：{os_name} {os_release} | 用户: {os.environ.get('OPENVIKING_USER', '')} 现在时间: {now_str}
+当前运行环境：{os_name} {os_release} | 用户: {os.environ.get('OPENVIKING_USER', '')} 
 
 skill内可使用的工具：{skill_names}
 
