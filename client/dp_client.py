@@ -186,20 +186,24 @@ class Renderer:
             self._print(Text(f"\n[错误] {evt.get('error', '')}", style="bold red"))
 
     def _usage(self, evt):
-        period = "高峰时段" if evt.get("peak") else "空闲时段"
-        self._print(Text(f"\n⏰ {period}（北京时间 周一至周五 9:00-12:00、14:00-18:00）", style="bold"))
+        default_period = "高峰时段（北京时间 周一至周五 9:00-12:00、14:00-18:00）" if evt.get("peak") \
+            else "空闲时段（北京时间 周一至周五 9:00-12:00、14:00-18:00）"
+        period = evt.get("period") or default_period
+        symbol = evt.get("symbol")
+        if symbol is None:
+            symbol = "¥" if evt.get("currency") == "CNY" else ""
+        self._print(Text(f"\n⏰ {period}", style="bold"))
         table = Table(show_header=False, border_style="dim")
         table.add_column("Key", style="bold")
         table.add_column("Value", style="cyan")
-        table.add_row("输入(缓存命中)", f"{evt.get('hit', 0):,} tokens  ¥{evt.get('cost_hit', 0):.4f}")
-        table.add_row("输入(缓存未命中)", f"{evt.get('miss', 0):,} tokens  ¥{evt.get('cost_miss', 0):.4f}")
-        table.add_row("输出", f"{evt.get('out', 0):,} tokens  ¥{evt.get('cost_out', 0):.4f}")
-        table.title = f"📊 Token 消耗统计 · {evt.get('model', '')} · 合计 ¥{evt.get('total', 0):.4f}"
+        table.add_row("输入(缓存命中)", f"{evt.get('hit', 0):,} tokens  {symbol}{evt.get('cost_hit', 0):.4f}")
+        table.add_row("输入(缓存未命中)", f"{evt.get('miss', 0):,} tokens  {symbol}{evt.get('cost_miss', 0):.4f}")
+        table.add_row("输出", f"{evt.get('out', 0):,} tokens  {symbol}{evt.get('cost_out', 0):.4f}")
+        table.title = f"📊 Token 消耗统计 · {evt.get('model', '')} · 合计 {symbol}{evt.get('total', 0):.4f}"
         self._print(table)
         balance = evt.get("balance")
         if balance is not None:
             currency = evt.get("currency", "")
-            symbol = "¥" if currency == "CNY" else ""
             self._print(Text(f"💰 账户余额：{symbol}{balance} {currency}".rstrip(), style="bold green"))
         else:
             self._line("💰 账户余额：查询失败", style="dim")

@@ -137,25 +137,27 @@ def ev_warning(message, code=None):
 
 
 def ev_usage(model, peak, hit, miss, out, costs, total, balance, currency):
+    from . import billing
+    symbol = billing.currency_symbol()
+    period = billing.period_label(bool(peak))
     payload = {
         "model": model, "peak": bool(peak),
         "hit": hit, "miss": miss, "out": out,
         "cost_hit": costs["hit"], "cost_miss": costs["miss"], "cost_out": costs["out"],
-        "total": total, "balance": balance, "currency": currency or "",
+        "total": total, "balance": balance, "currency": currency or billing.currency(),
+        "symbol": symbol, "period": period,
     }
 
     def t():
-        period = "高峰时段" if peak else "空闲时段"
-        console.print(f"\n⏰ {period}（北京时间 周一至周五 9:00-12:00、14:00-18:00）", style="bold")
+        console.print(f"\n⏰ {period}", style="bold")
         rows = [
-            ("输入(缓存命中)", f"{hit:,} tokens  ¥{costs['hit']:.4f}"),
-            ("输入(缓存未命中)", f"{miss:,} tokens  ¥{costs['miss']:.4f}"),
-            ("输出", f"{out:,} tokens  ¥{costs['out']:.4f}"),
+            ("输入(缓存命中)", f"{hit:,} tokens  {symbol}{costs['hit']:.4f}"),
+            ("输入(缓存未命中)", f"{miss:,} tokens  {symbol}{costs['miss']:.4f}"),
+            ("输出", f"{out:,} tokens  {symbol}{costs['out']:.4f}"),
         ]
-        render_table(f"📊 Token 消耗统计 · {model} · 合计 ¥{total:.4f}", rows)
+        render_table(f"📊 Token 消耗统计 · {model} · 合计 {symbol}{total:.4f}", rows)
         if balance is not None:
-            symbol = "¥" if currency == "CNY" else ""
-            console.print(f"💰 账户余额：{symbol}{balance} {currency or ''}", style="bold green")
+            console.print(f"💰 账户余额：{symbol}{balance} {currency or billing.currency()}", style="bold green")
         else:
             console.print("💰 账户余额：查询失败", style="dim")
     _ev("usage", payload, t)

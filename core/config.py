@@ -22,6 +22,36 @@ DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
 DEEPSEEK_BASE_URL = os.environ.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
 DEEPSEEK_MODEL = os.environ.get('DEEPSEEK_MODEL', 'deepseek-v4-flash')
 
+# 接入方式（协议）：
+#   responses = DeepSeek 官方 Responses API（默认；支持服务端内置 web_search）
+#   chat      = OpenAI 兼容 Chat Completions API（OpenCode Zen / OpenCode Go 等网关）
+DEEPSEEK_API_TYPE = (os.environ.get('DEEPSEEK_API_TYPE', '') or 'responses').strip().lower()
+
+
+def _infer_provider(base_url):
+    """按 base_url 推断服务商：OpenCode Go（/zen/go/v1）→ opencode-go，其余 → deepseek"""
+    u = (base_url or '').lower()
+    if 'opencode.ai' in u and '/go' in u:
+        return 'opencode-go'
+    return 'deepseek'
+
+
+# 服务商标识（用于计费/峰谷/余额策略）：deepseek / opencode-go；留空按 base_url 自动推断
+LLM_PROVIDER = (os.environ.get('LLM_PROVIDER', '') or '').strip().lower() or _infer_provider(DEEPSEEK_BASE_URL)
+
+# 会话标识请求头：OpenCode Go 建议每个会话稳定携带（提升路由与前缀缓存命中）。
+# 留空则：OpenCode 系自动启用 x-opencode-session，其它服务商不发送。
+_session_header_env = (os.environ.get('LLM_SESSION_HEADER', '') or '').strip()
+if _session_header_env:
+    LLM_SESSION_HEADER = _session_header_env
+elif LLM_PROVIDER.startswith('opencode'):
+    LLM_SESSION_HEADER = 'x-opencode-session'
+else:
+    LLM_SESSION_HEADER = ''
+
+# 客户端 User-Agent：OpenCode Go 建议使用自有客户端名而非通用 SDK 名；留空用 SDK 默认
+LLM_USER_AGENT = (os.environ.get('LLM_USER_AGENT', '') or '').strip()
+
 # ===== 工具调用 =====
 # 工具调用最大轮数：对话开始批量并行执行模型请求的工具，结果一次性回传后给出最终回答；
 # 若模型在最终轮仍请求工具，在预算内可再执行，超出则强制基于已有结果作答。

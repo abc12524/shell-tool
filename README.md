@@ -12,6 +12,7 @@
 - **对话持久化** — 先落本地 SQLite（唯一读写源），再幂等同步到在线 MySQL，支持继续/新建/指定会话
 - **记忆注入** — 每轮对话前自动检索相关记忆并注入上下文
 - **流式输出** — 展示思考过程（reasoning）与最终回答
+- **多协议接入** — 除 DeepSeek 官方 Responses API 外，支持 OpenAI 兼容 Chat Completions 网关（OpenCode Zen / OpenCode Go，含 `deepseek-v4.1-flash` 等模型）
 - **HTTP API** — 提供 `/chat`（同步）与 `/chat/stream`（SSE 流式）接口
 
 ## 目录结构
@@ -22,7 +23,7 @@ shell-tool/
 ├── core/
 │   ├── config.py             # 环境变量加载与全局配置
 │   ├── db.py                 # 存储层：本地 SQLite 唯一读写源 + 在线 MySQL 幂等同步
-│   ├── llm.py                # API 调用层：流式请求 + 工具调用循环
+│   ├── llm.py                # API 调用层：流式请求 + 工具调用循环（Responses / Chat Completions 双协议）
 │   ├── main.py               # CLI 主流程：参数解析、会话管理、记忆注入
 │   └── tools/
 │       ├── system_tools.py   # 系统信息 / 命令执行（原生 tool）
@@ -75,9 +76,13 @@ cp .env.example .env
 
 | 变量 | 说明 |
 |------|------|
-| `DEEPSEEK_API_KEY` | DeepSeek API Key |
-| `DEEPSEEK_BASE_URL` | DeepSeek API 地址（默认 `https://api.deepseek.com`） |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key（接入 OpenCode 时填 OpenCode 的 Key） |
+| `DEEPSEEK_BASE_URL` | API 地址（默认 `https://api.deepseek.com`） |
 | `DEEPSEEK_MODEL` | 模型名（默认 `deepseek-v4-flash`） |
+| `DEEPSEEK_API_TYPE` | 接入协议：`responses`=DeepSeek 官方 Responses API（默认）；`chat`=OpenAI 兼容 Chat Completions（OpenCode 等网关） |
+| `LLM_PROVIDER` | 服务商（决定计费/峰谷/余额）：`deepseek` / `opencode-go`；留空按 `DEEPSEEK_BASE_URL` 自动推断 |
+| `LLM_SESSION_HEADER` | 会话标识请求头名：OpenCode Go 建议 `x-opencode-session`；留空时 OpenCode 系自动启用 |
+| `LLM_USER_AGENT` | 客户端 User-Agent 标识（OpenCode Go 建议用自有客户端名）；留空用 SDK 默认 |
 | `MAX_TOOL_ROUNDS` | 工具调用最大轮数（默认 6） |
 | `LLM_WEB_SEARCH` | LLM 内置联网搜索（DeepSeek Responses API 自带 web_search）开关：`false`=关闭（默认），`true`=开启 |
 | `DB_ONLINE` | 在线 MySQL 同步开关：`true`=开启同步（默认 true；未配置或连接失败则仅用 SQLite），`false`=关闭 |
@@ -85,6 +90,29 @@ cp .env.example .env
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | 在线 MySQL（同步副本）连接信息 |
 | `BAIDU_QIANFAN_KEY` | 百度千帆搜索密钥（`skill/baidu_search.py`） |
 | `OPENVIKING_URL/KEY/USER` | OpenViking 外置记忆服务 |
+
+### 接入 OpenCode Go（deepseek-v4.1-flash）
+
+OpenCode Go 通过 OpenAI 兼容的 Chat Completions 接口提供 `deepseek-v4.1-flash`（模型 ID 即 `deepseek-v4.1-flash`），
+与 DeepSeek 官方 Responses API 协议不同，需切换 `DEEPSEEK_API_TYPE=chat` 并指向 OpenCode Go 的 base_url。
+在 OpenCode Console 订阅 Go 并获取 API Key 后，`.env` 配置如下：
+
+```dotenv
+DEEPSEEK_API_KEY=<OpenCode API Key>
+DEEPSEEK_BASE_URL=https://opencode.ai/zen/go/v1
+DEEPSEEK_MODEL=deepseek-v4.1-flash
+DEEPSEEK_API_TYPE=chat
+LLM_PROVIDER=opencode-go
+LLM_SESSION_HEADER=x-opencode-session
+LLM_USER_AGENT=shell-tool/1.0
+```
+
+- `DEEPSEEK_API_TYPE`：`chat` 走 Chat Completions（OpenAI 兼容网关）；`responses`（默认）走 DeepSeek 官方 Responses API。
+  Chat 模式下服务端内置 `web_search`（`LLM_WEB_SEARCH`）不生效，搜索请用 `baidu_search` skill。
+- `LLM_PROVIDER=opencode-go`：启用 OpenCode Go 计费口径（美元、UTC 峰谷 01:00-04:00 / 06:00-10:00，无余额接口）；
+  留空时按 `DEEPSEEK_BASE_URL` 自动推断。
+- `LLM_SESSION_HEADER` / `LLM_USER_AGENT`：OpenCode Go 建议客户端以自有 UA 标识、并按会话稳定携带 session 头，
+  以优化路由与前缀缓存；留空时 OpenCode 系会自动发送 `x-opencode-session`。
 
 ### 数据库存储
 

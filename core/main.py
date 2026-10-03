@@ -205,9 +205,14 @@ async def _async_main():
     if config.OV_AUTO_CAPTURE:
         ov_session_id = openviking_ensure_session(session_id)
 
+    # 默认请求头：OpenCode Go 建议客户端以自有 UA 标识自己（非通用 SDK 名）
+    default_headers = {}
+    if config.LLM_USER_AGENT:
+        default_headers['User-Agent'] = config.LLM_USER_AGENT
     client = AsyncOpenAI(
         api_key=config.DEEPSEEK_API_KEY,
         base_url=config.DEEPSEEK_BASE_URL,
+        default_headers=default_headers or None,
     )
 
     # system prompt 固定在最前（时间戳用会话创建时间，跨轮稳定）

@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""API 调用层：Responses API 流式请求 + 工具调用循环
+"""API 调用层：流式请求 + 工具调用循环（支持两种接入协议）
 
-内部消息序列统一保持"聊天格式"（role=user/assistant/tool + tool_calls），
-仅在发送给 API 时转换为 Responses API 的 input item 列表（to_responses_input），
-因此 DB 存储、会话重建、工具分发等下游逻辑无需改动。
+- responses：DeepSeek 官方 Responses API（默认）
+- chat：OpenAI 兼容 Chat Completions API（OpenCode Zen / OpenCode Go 等网关）
+
+按 config.DEEPSEEK_API_TYPE 由 stream_llm 分发；两种协议返回签名一致，
+上层工具循环无差别复用。
+
+内部消息序列统一保持"聊天格式"（role=user/assistant/tool + tool_calls）：
+- chat 协议直接规整后发送（to_chat_messages / to_chat_tools）
+- responses 协议仅在发送时转换为 Responses API 的 input item 列表（to_responses_input），
+  因此 DB 存储、会话重建、工具分发等下游逻辑无需改动。
 """
 import hashlib
 import json
@@ -83,6 +90,64 @@ def to_responses_tools(tools):
     return out
 
 
+def to_chat_messages(messages):
+    """将内部聊天格式消息规整为 Chat Completions 请求消息。
+
+    - 丢弃 Responses 专属字段（output_items），以及 reasoning_content
+      （DeepSeek 等 OpenAI 兼容接口不接受回传思考内容）
+    - 保留 user/system/assistant(含 tool_calls)/tool 的聊天结构，无需转换协议
+    """
+    out = []
+    for m in messages:
+        role = m.get('role')
+        if role in ('system', 'user'):
+            out.append({"role": role, "content": m.get('content') or ''})
+        elif role == 'assistant':
+            msg = {"role": "assistant", "content": m.get('content') or ''}
+            tool_calls = m.get('tool_calls') or []
+            if tool_calls:
+                serialized = []
+                for tc in tool_calls:
+                    if isinstance(tc, dict):
+                        fn = tc.get('function', {})
+                        serialized.append({
+                            "id": tc.get('id'),
+                            "type": "function",
+                            "function": {"name": fn.get('name'), "arguments": fn.get('arguments')},
+                        })
+                    else:
+                        serialized.append({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        })
+                msg['tool_calls'] = serialized
+            out.append(msg)
+        elif role == 'tool':
+            out.append({
+                "role": "tool",
+                "tool_call_id": m.get('tool_call_id'),
+                "content": m.get('content') or '',
+            })
+    return out
+
+
+def to_chat_tools(tools):
+    """将聊天格式 tool schema 转换为 Chat Completions 格式。
+
+    聊天格式与 OpenAI function 格式一致，原样返回 function 工具；
+    web_search 为 Responses API 服务端内置工具，Chat Completions 不支持，直接丢弃。
+    """
+    return [t for t in (tools or []) if t.get('type') == 'function']
+
+
+def _session_headers(session_id):
+    """按配置生成会话标识请求头（OpenCode Go 路由/缓存优化用）；未配置会话头时返回 None"""
+    if config.LLM_SESSION_HEADER and session_id:
+        return {config.LLM_SESSION_HEADER: str(session_id)}
+    return None
+
+
 def _normalize_usage(usage):
     """把 Responses API 的 usage 归一化为聊天格式属性对象（兼容 print_usage_stats）"""
     if usage is None:
@@ -106,6 +171,47 @@ def _normalize_usage(usage):
         prompt_cache_hit_tokens=cached,
         prompt_cache_miss_tokens=input_tokens - cached,
         total_tokens=input_tokens + output_tokens,
+        reasoning_tokens=reasoning_tokens,
+    )
+
+
+def _normalize_chat_usage(usage):
+    """把 Chat Completions 的 usage 归一化为聊天格式属性对象（兼容 print_usage_stats）
+
+    兼容两种缓存字段表达：
+    - DeepSeek 直出 prompt_cache_hit_tokens / prompt_cache_miss_tokens
+    - OpenAI 标准 prompt_tokens_details.cached_tokens（miss = input - cached）
+    """
+    if usage is None:
+        return None
+    input_tokens = getattr(usage, 'prompt_tokens', 0) or 0
+    output_tokens = getattr(usage, 'completion_tokens', 0) or 0
+
+    hit = getattr(usage, 'prompt_cache_hit_tokens', None)
+    miss = getattr(usage, 'prompt_cache_miss_tokens', None)
+    if hit is None:
+        cached = 0
+        input_details = getattr(usage, 'prompt_tokens_details', None)
+        if input_details is not None:
+            cached = getattr(input_details, 'cached_tokens', 0) or 0
+        hit = cached
+        miss = input_tokens - cached
+    else:
+        hit = hit or 0
+        if miss is None:
+            miss = input_tokens - hit
+
+    reasoning_tokens = 0
+    output_details = getattr(usage, 'completion_tokens_details', None)
+    if output_details is not None:
+        reasoning_tokens = getattr(output_details, 'reasoning_tokens', 0) or 0
+
+    return SimpleNamespace(
+        prompt_tokens=input_tokens,
+        completion_tokens=output_tokens,
+        prompt_cache_hit_tokens=hit,
+        prompt_cache_miss_tokens=miss,
+        total_tokens=getattr(usage, 'total_tokens', None) or (input_tokens + output_tokens),
         reasoning_tokens=reasoning_tokens,
     )
 
@@ -135,13 +241,14 @@ def _add_usage(total, usage):
     return total
 
 
-async def stream_responses_api(client, messages):
+async def stream_responses_api(client, messages, session_id=None):
     """异步调用 Responses API 流式接口，返回 (content, reasoning, tool_calls, output_items, usage)
 
     tool_calls 为聊天格式 dict 列表（兼容 DB 存储与 process_tool_calls），
     output_items 为服务端 output 中可回传 items 的原始顺序序列
     （message/reasoning/web_search_call/function_call，按原文回传），
     usage 为聊天格式属性对象（prompt_tokens/completion_tokens/...）。
+    会话标识通过 extra_headers 携带（如 OpenCode 系 /responses 模型）。
     """
     instructions, input_items = _split_instructions(messages)
 
@@ -153,13 +260,20 @@ async def stream_responses_api(client, messages):
             _dbg.append(f"{_role}:{hashlib.md5(_blob.encode()).hexdigest()[:6]}")
         print("DBGSEQ> " + " | ".join(_dbg))
 
-    stream = await client.responses.create(
-        model=config.DEEPSEEK_MODEL,
-        input=input_items,
-        tools=to_responses_tools(TOOLS),
-        tool_choice="auto",
-        stream=True,
-    )
+    create_kwargs = {
+        "model": config.DEEPSEEK_MODEL,
+        "input": input_items,
+        "tools": to_responses_tools(TOOLS),
+        "tool_choice": "auto",
+        "stream": True,
+    }
+    # system 消息需通过 instructions 参数传回（Responses API 会插入为首条 system 消息）
+    if instructions:
+        create_kwargs["instructions"] = instructions
+    headers = _session_headers(session_id)
+    if headers:
+        create_kwargs["extra_headers"] = headers
+    stream = await client.responses.create(**create_kwargs)
 
     content = ""
     reasoning = ""
@@ -247,6 +361,133 @@ async def stream_responses_api(client, messages):
         })
 
     return content, reasoning, tool_calls, output_items, usage
+
+
+def _delta_reasoning(delta):
+    """读取思考增量：DeepSeek 返回 reasoning_content；兼容 SDK 放入 model_extra 的情况"""
+    value = getattr(delta, 'reasoning_content', None)
+    if value is None:
+        extra = getattr(delta, 'model_extra', None) or {}
+        value = extra.get('reasoning_content')
+    return value or ''
+
+
+async def stream_chat_completions(client, messages, session_id=None):
+    """异步调用 OpenAI 兼容 Chat Completions 流式接口（OpenCode Zen / OpenCode Go 等）。
+
+    返回签名与 stream_responses_api 完全一致，便于上层工具循环无差别复用：
+    - tool_calls 为聊天格式 dict 列表（跨 delta 按 index 聚合）
+    - output_items 恒为空列表（Chat Completions 无服务端 output items 概念）
+    - usage 已归一化为聊天格式属性对象
+    会话标识通过 extra_headers 携带（config.LLM_SESSION_HEADER，如 x-opencode-session）。
+    """
+    chat_messages = to_chat_messages(messages)
+
+    kwargs = {
+        "model": config.DEEPSEEK_MODEL,
+        "messages": chat_messages,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    tools = to_chat_tools(TOOLS)
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    headers = _session_headers(session_id)
+    if headers:
+        kwargs["extra_headers"] = headers
+
+    if config.DEBUG_SEND_SEQ:
+        _dbg = []
+        for _m in chat_messages:
+            _blob = json.dumps(_m, ensure_ascii=False, sort_keys=True)
+            _dbg.append(f"{_m.get('role', '?')}:{hashlib.md5(_blob.encode()).hexdigest()[:6]}")
+        print("DBGSEQ> " + " | ".join(_dbg))
+
+    try:
+        stream = await client.chat.completions.create(**kwargs)
+    except Exception as e:
+        # 部分网关不支持 stream_options.include_usage → 去掉后重试一次
+        if 'stream_options' not in str(e).lower():
+            raise
+        kwargs.pop('stream_options', None)
+        stream = await client.chat.completions.create(**kwargs)
+
+    content = ""
+    reasoning = ""
+    usage = None
+    tool_acc = {}  # index → {'id', 'name', 'arguments'}
+
+    live_reasoning = LiveReasoning().start()
+    live_md = None  # 思考结束后再启动
+
+    async for chunk in stream:
+        chunk_usage = getattr(chunk, 'usage', None)
+        if chunk_usage is not None:
+            usage = _normalize_chat_usage(chunk_usage)
+
+        choices = getattr(chunk, 'choices', None) or []
+        if not choices:
+            continue
+        delta = getattr(choices[0], 'delta', None)
+        if delta is None:
+            continue
+
+        r = _delta_reasoning(delta)
+        if r:
+            reasoning += r
+            live_reasoning.feed(r)
+
+        dcontent = getattr(delta, 'content', None)
+        if dcontent:
+            content += dcontent
+            if live_md is None:
+                # 思考结束，切换到 Markdown 渲染
+                live_reasoning.finish()
+                if reasoning:
+                    events.ev_reasoning_header()
+                live_md = LiveMarkdown().start()
+            live_md.feed(dcontent)
+
+        for tc in (getattr(delta, 'tool_calls', None) or []):
+            idx = getattr(tc, 'index', 0)
+            slot = tool_acc.setdefault(idx, {'id': None, 'name': '', 'arguments': ''})
+            if getattr(tc, 'id', None):
+                slot['id'] = tc.id
+            fn = getattr(tc, 'function', None)
+            if fn is not None:
+                if getattr(fn, 'name', None):
+                    slot['name'] = fn.name
+                if getattr(fn, 'arguments', None):
+                    slot['arguments'] += fn.arguments
+
+    # 流式结束，关闭 Live 渲染
+    if live_md is not None:
+        live_md.finish()
+    else:
+        live_reasoning.finish()
+
+    tool_calls = []
+    for idx in sorted(k for k in tool_acc if k is not None):
+        fc = tool_acc[idx]
+        tool_calls.append({
+            "id": fc['id'],
+            "type": "function",
+            "function": {"name": fc['name'], "arguments": fc['arguments']},
+        })
+
+    return content, reasoning, tool_calls, [], usage
+
+
+async def stream_llm(client, messages, session_id=None):
+    """按 config.DEEPSEEK_API_TYPE 分发到对应协议的流式实现：
+
+    responses = DeepSeek 官方 Responses API；chat = OpenAI 兼容 Chat Completions。
+    两者返回签名一致，上层工具调用循环无需感知协议差异。
+    """
+    if config.DEEPSEEK_API_TYPE == 'chat':
+        return await stream_chat_completions(client, messages, session_id=session_id)
+    return await stream_responses_api(client, messages, session_id=session_id)
 
 
 def _extract_output_items(output):
@@ -341,7 +582,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
     total_usage = None
 
     # ---- 请求 1.1：工具 + 问题 → 思维链 + 工具调用 ----
-    content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+    content, reasoning, tool_calls, output_items, usage = await stream_llm(client, messages, session_id=session_id)
     total_usage = _add_usage(total_usage, usage)
     web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
     assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
@@ -386,7 +627,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
 
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
         events.ev_continuing(tool_rounds)
-        content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+        content, reasoning, tool_calls, output_items, usage = await stream_llm(client, messages, session_id=session_id)
         total_usage = _add_usage(total_usage, usage)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
@@ -404,7 +645,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
             recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
             messages.append(recall_msg)
             _persist(session_id, ov_session_id, [recall_msg])
-        content, reasoning, tool_calls, output_items, usage = await stream_responses_api(client, messages)
+        content, reasoning, tool_calls, output_items, usage = await stream_llm(client, messages, session_id=session_id)
         total_usage = _add_usage(total_usage, usage)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
