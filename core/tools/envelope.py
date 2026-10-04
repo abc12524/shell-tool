@@ -17,11 +17,18 @@ def ok(result=None):
     return json.dumps({"status": "ok", "result": result}, ensure_ascii=False)
 
 
-def error(message, code=None):
-    """构造失败信封。code 为可选的稳定错误类别（如 timeout/http/internal）。"""
+def error(message, code=None, **extra):
+    """构造失败信封。code 为可选的稳定错误类别（如 timeout/http/internal）。
+
+    extra 为可选附加字段（如候选列表 matches），非 None 时并入信封，便于调用方
+    在失败时仍能拿到上下文（例：文件名解析出多个候选）。
+    """
     payload = {"status": "error", "error": str(message)}
     if code is not None:
         payload["code"] = code
+    for key, value in extra.items():
+        if value is not None:
+            payload[key] = value
     return json.dumps(payload, ensure_ascii=False)
 
 

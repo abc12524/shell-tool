@@ -179,6 +179,150 @@ def _search_payload(query, score_threshold=None, limit=None):
     return payload
 
 
+# ============= 按文件名解析 URI =============
+def _memory_base(category: str = "") -> str:
+    """当前 peer 的记忆目录根，与 openviking_remember 的写入路径保持一致。
+
+    viking://user/<user>/peers/<agent>/memories/[_<category>/]
+    """
+    user = os.environ.get('OPENVIKING_USER', '')
+    agent = os.environ.get('OPENVIKING_AGENT', 'default')
+    base = f"viking://user/{user}/peers/{agent}/memories/"
+    return base + (f"{category}/" if category else "")
+
+
+def _ensure_parent_dirs(uri: str) -> None:
+    """逐级 mkdir 创建 uri 的父目录（忽略已存在的错误）。"""
+    parts = uri.split("/")
+    for i in range(6, len(parts)):
+        parent = "/".join(parts[:i]) + "/"
+        _ov_post("/api/v1/fs/mkdir", {"uri": parent}, timeout=5)
+
+
+def _memory_search_bases():
+    """按名检索时依次尝试的记忆根目录。
+
+    首选当前 peer 目录（与 openviking_remember 写入位置一致），再回退用户级
+    记忆目录（官方默认布局 viking://user/<user>/memories/）。两者可能因 peer
+    配置不同而只有一个存在，顺序探测可让“只传文件名”在两种布局下都命中。
+    """
+    user = os.environ.get('OPENVIKING_USER', '')
+    peer_base = _memory_base()
+    user_base = f"viking://user/{user}/memories/"
+    return [peer_base] if peer_base == user_base else [peer_base, user_base]
+
+
+def _extract_glob_matches(result):
+    """从 /api/v1/search/glob 响应里宽容地取出 URI 列表。"""
+    raw = result.get("result") if isinstance(result, dict) else None
+    matches = []
+    if isinstance(raw, dict):
+        for key in ("matches", "files", "results", "hits", "items"):
+            if isinstance(raw.get(key), list):
+                matches = raw[key]
+                break
+    elif isinstance(raw, list):
+        matches = raw
+    normalized, seen = [], set()
+    for it in matches:
+        uri = it if isinstance(it, str) else (it.get("uri") or it.get("path") if isinstance(it, dict) else None)
+        if uri and uri not in seen:
+            seen.add(uri)
+            normalized.append(uri)
+    return normalized
+
+
+def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20) -> str:
+    """按文件名/片段解析出记忆库中的完整 viking:// URI。
+
+    服务端没有“只传文件名即可读写”的接口（content/read、content/write 的 uri 均必填），
+    但提供 /api/v1/search/glob 做文件名模式匹配，这里用它完成解析。
+    - name: 文件名或片段，如 "ov删除工具" / "ov删除工具.md"
+    - base_uri: 检索根目录；留空时依次探测 peer / 用户级记忆目录（见 _memory_search_bases）
+    - limit: 最多返回的候选数（1~200）
+    命中 0 / 多命中时交由调用方（read/write/forget）决定如何处理。
+    """
+    name = (name or "").strip()
+    if not name:
+        return error("缺少文件名 name", code="bad_request")
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        n = 20
+    n = max(1, min(200, n))
+    pattern = f"**/*{name}*"
+    bases = [base_uri] if base_uri else _memory_search_bases()
+
+    matched_base, matches, first_result = bases[0], [], None
+    for base in bases:
+        try:
+            result = _ov_post(
+                "/api/v1/search/glob",
+                {"pattern": pattern, "uri": base, "node_limit": n},
+                timeout=15,
+            )
+        except Exception as e:
+            return error(f"解析文件名失败 - {str(e)}", code="internal")
+        if is_error(result):
+            return json.dumps(result, ensure_ascii=False)
+        if first_result is None:
+            first_result = result
+        found = _extract_glob_matches(result)
+        if found:
+            matched_base, matches = base, found
+            break
+    return ok({
+        "name": name,
+        "base_uri": matched_base,
+        "pattern": pattern,
+        "count": len(matches),
+        "matches": matches,
+    })
+
+
+def _resolve_single(name: str, base_uri: str = ""):
+    """把 name 解析为唯一 URI。返回 (uri, response)。
+
+    唯一命中 → (uri, None)；未命中/多命中 → ("", 已序列化信封字符串)。
+    """
+    result = openviking_resolve_name(name, base_uri)
+    data = json.loads(result) if isinstance(result, str) else result
+    if not isinstance(data, dict) or is_error(data):
+        resp = result if isinstance(result, str) else json.dumps(data, ensure_ascii=False)
+        return "", resp
+    res = data.get("result") or {}
+    matches = res.get("matches") or []
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        return "", error(f"未找到匹配文件: {name}", code="not_found",
+                         name=name, base_uri=res.get("base_uri", ""))
+    return "", error(
+        f"文件名 '{name}' 匹配到 {len(matches)} 个文件，请改用完整 uri 或更精确的名字",
+        code="ambiguous", name=name, matches=matches)
+
+
+def _resolve_for_write(name: str, mode: str, base_uri: str = ""):
+    """写入场景的文件名解析：唯一命中直接用；未命中且 mode=create 时按记忆根新建。
+
+    返回 (uri, response)；response 非 None 表示解析失败/歧义，调用方应直接返回它。
+    """
+    uri, resp = _resolve_single(name, base_uri)
+    if resp is None:
+        return uri, None
+    data = json.loads(resp) if isinstance(resp, str) else resp
+    if isinstance(data, dict) and data.get("code") == "not_found" and mode == "create":
+        rel = name.strip().lstrip("/")
+        if not rel:
+            return "", resp
+        if "." not in rel.split("/")[-1]:
+            rel += ".md"
+        new_uri = (base_uri or _memory_base()) + rel
+        _ensure_parent_dirs(new_uri)
+        return new_uri, None
+    return "", resp
+
+
 # ============= 记忆 =============
 def _extract_memories(result):
     """从 OpenViking 搜索响应中提取并归一化记忆列表。
@@ -343,27 +487,16 @@ def openviking_search(query: str, score_threshold: float = None, limit: int = No
 
 def openviking_remember(category: str, name: str, content: str) -> str:
     """将信息保存到 OpenViking 记忆"""
-    user = os.environ.get('OPENVIKING_USER', '')
-    agent = os.environ.get('OPENVIKING_AGENT', 'default')
-    path_map = {
-        "preferences": f"viking://user/{user}/peers/{agent}/memories/preferences/{name}.md",
-        "entities":    f"viking://user/{user}/peers/{agent}/memories/entities/{name}.md",
-        "events":      f"viking://user/{user}/peers/{agent}/memories/events/{name}.md",
-        "experiences": f"viking://user/{user}/peers/{agent}/memories/experiences/{name}.md",
-    }
-    uri = path_map.get(category)
-    if not uri:
+    if category not in ("preferences", "entities", "events", "experiences"):
         return error(
             f"未知分类: {category}，可选: preferences/entities/events/experiences",
             code="bad_category",
         )
+    uri = _memory_base(category) + f"{name}.md"
 
     try:
         # 递归创建父目录（逐级 mkdir，忽略已存在的错误）
-        parts = uri.split("/")
-        for i in range(6, len(parts)):
-            parent = "/".join(parts[:i]) + "/"
-            _ov_post("/api/v1/fs/mkdir", {"uri": parent}, timeout=5)
+        _ensure_parent_dirs(uri)
 
         # 写入内容：先试 replace（文件已存在），失败再试 create（新建）
         write_result = _ov_post(
@@ -394,15 +527,20 @@ def openviking_remember(category: str, name: str, content: str) -> str:
         return error(f"保存记忆失败 - {str(e)}", code="internal")
 
 
-def openviking_read(uri: str) -> str:
+def openviking_read(uri: str, name: str = "") -> str:
     """读取 OpenViking 文件内容
 
-    支持单个 URI 字符串或 URI 列表（数组）：
-    - 单个字符串 → 直接返回文件内容
-    - 列表 → 逐个读取并聚合返回（多文件读取）
+    支持三种调用方式：
+    - 单个 URI 字符串 → 直接返回文件内容
+    - URI 列表（数组）   → 逐个读取并聚合返回（多文件读取）
+    - 仅给文件名 name    → 先按名解析出唯一 URI（见 openviking_resolve_name）再读取
     """
     if isinstance(uri, list):
         return _aggregate_read(uri)
+    if not uri and name:
+        uri, resp = _resolve_single(name)
+        if resp is not None:
+            return resp
     try:
         result = _ov_get("/api/v1/content/read", params={"uri": uri})
         if is_error(result):
@@ -446,8 +584,18 @@ def openviking_list_dir(uri: str, recursive: bool = False) -> str:
         return error(f"列出目录失败 - {str(e)}", code="internal")
 
 
-def openviking_write_file(uri: str, content: str, mode: str = "replace") -> str:
-    """写入内容到 OpenViking 文件（create/replace/append）"""
+def openviking_write_file(uri: str, content: str, mode: str = "replace", name: str = "") -> str:
+    """写入内容到 OpenViking 文件（create/replace/append）
+
+    仅给文件名 name（不给 uri）时，先按名解析：
+    - 唯一命中 → 写该文件；
+    - mode=create 且未命中 → 在记忆根目录下按 name 新建（自动补 .md、建父目录）；
+    - 其余未命中/多命中 → 返回 not_found / ambiguous 信封，不落盘。
+    """
+    if not uri and name:
+        uri, resp = _resolve_for_write(name, mode)
+        if resp is not None:
+            return resp
     try:
         payload = {"uri": uri, "content": content, "mode": mode}
         if mode == "create":
@@ -460,12 +608,17 @@ def openviking_write_file(uri: str, content: str, mode: str = "replace") -> str:
         return error(f"写入失败 - {str(e)}", code="internal")
 
 
-def openviking_forget(uri: str, recursive: bool = False) -> str:
+def openviking_forget(uri: str, recursive: bool = False, name: str = "") -> str:
     """从 OpenViking 删除（遗忘）文件或目录。
 
     对齐 MCP forget：recursive=True 时递归删除目录及其所有子项。
+    仅给文件名 name（不给 uri）时先按名解析，且要求唯一命中（删除不接受歧义）。
     注意：此操作不可撤销。
     """
+    if not uri and name:
+        uri, resp = _resolve_single(name)
+        if resp is not None:
+            return resp
     if not uri or not uri.strip():
         return error("缺少 uri 参数，请提供要删除的文件/目录 URI", code="bad_request")
     try:
