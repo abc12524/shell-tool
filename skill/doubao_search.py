@@ -8,7 +8,6 @@
 #   arguments.need_content = true|false，服务端过滤：只返回有正文的结果，默认 false
 #   arguments.include_content = true|false，结果里是否带正文字段 content，默认 false（正文可达上万字符，慎开）
 #   arguments.need_url = true|false，服务端过滤：只返回带 URL 的结果，默认 true
-#   arguments.need_summary = true|false，兼容参数（服务端恒返回 Summary，此参数无实际效果）
 #   arguments.content_format = 正文格式 text（默认）| markdown（include_content=true 时可见）
 #   arguments.site = 限定站点（如 example.com），多个用 | 分隔、最多 20 个，默认不限
 #   arguments.block = 屏蔽站点，多个用 | 分隔、最多 5 个，默认空
@@ -18,7 +17,6 @@
 #   arguments.q_rewrite = true|false，是否改写 query（更慢），默认 false
 #   arguments.timeout = 请求超时秒数，默认 20
 #   示例: {"query": "武汉今天天气", "count": 3}
-#   凭证: 环境变量 FEEDCOOP_API_KEY（写在项目 .env，勿硬编码）；接口文档 /root/docs/doubao-feedcoop-search-api.md
 #   注意: 该 API 静默忽略未知字段——参数名写错不报错、只是不生效。过滤器必须用 Filter.Sites /
 #         Filter.BlockHosts / Filter.AuthInfoLevel，正文格式用 ContentFormats，改写用 QueryControl.QueryRewrite
 import json
