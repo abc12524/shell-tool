@@ -165,18 +165,16 @@ def _find_payload(query, score_threshold=None, limit=None, target_uri=""):
 def _search_payload(query, score_threshold=None, limit=None):
     """上下文感知搜索（/api/v1/search/search）的请求体构造。
 
-    与 find 不同：search 端点支持按 actor 隔离（peer_id），故在
-    OV_RECALL_PEER_SCOPE=='actor' 时把 peer_id 纳入请求体；项目隔离同时由
-    X-OpenViking-Peer 请求头承载。
+    与 find 完全对齐：peer 隔离只走 X-OpenViking-Peer 请求头（见 _ov_headers），
+    请求体不携带任何 peer 字段。服务端 SearchRequest 无 peer_id 字段（旧实现误塞
+    会被请求校验拒绝 → HTTP 400）；peer_scope 又要求 mode='context'，而本工具用
+    默认 list 模式，故同样不带。OV_RECALL_PEER_SCOPE 仅决定请求头携带的 peer 身份。
     """
-    payload = {
+    return {
         "query": query,
         "score_threshold": score_threshold if score_threshold is not None else config.OV_SEARCH_THRESHOLD,
         "limit": limit if limit is not None else config.OV_SEARCH_LIMIT,
     }
-    if config.OV_RECALL_PEER_SCOPE == 'actor':
-        payload["peer_id"] = openviking_peer_id()
-    return payload
 
 
 # ============= 按文件名解析 URI =============
@@ -527,18 +525,19 @@ def openviking_remember(category: str, name: str, content: str) -> str:
         return error(f"保存记忆失败 - {str(e)}", code="internal")
 
 
-def openviking_read(uri: str, name: str = "") -> str:
+def openviking_read(uri: str, name: str = "", base_uri: str = "") -> str:
     """读取 OpenViking 文件内容
 
     支持三种调用方式：
     - 单个 URI 字符串 → 直接返回文件内容
     - URI 列表（数组）   → 逐个读取并聚合返回（多文件读取）
-    - 仅给文件名 name    → 先按名解析出唯一 URI（见 openviking_resolve_name）再读取
+    - 仅给文件名 name    → 先按名解析出唯一 URI（见 openviking_resolve_name）再读取；
+                         可用 base_uri 指定解析根目录（默认探测 peer / 用户级记忆目录）
     """
     if isinstance(uri, list):
         return _aggregate_read(uri)
     if not uri and name:
-        uri, resp = _resolve_single(name)
+        uri, resp = _resolve_single(name, base_uri)
         if resp is not None:
             return resp
     try:
@@ -584,16 +583,17 @@ def openviking_list_dir(uri: str, recursive: bool = False) -> str:
         return error(f"列出目录失败 - {str(e)}", code="internal")
 
 
-def openviking_write_file(uri: str, content: str, mode: str = "replace", name: str = "") -> str:
+def openviking_write_file(uri: str, content: str, mode: str = "replace", name: str = "", base_uri: str = "") -> str:
     """写入内容到 OpenViking 文件（create/replace/append）
 
     仅给文件名 name（不给 uri）时，先按名解析：
     - 唯一命中 → 写该文件；
-    - mode=create 且未命中 → 在记忆根目录下按 name 新建（自动补 .md、建父目录）；
+    - mode=create 且未命中 → 在 base_uri（默认记忆根目录）下按 name 新建（自动补 .md、建父目录）；
     - 其余未命中/多命中 → 返回 not_found / ambiguous 信封，不落盘。
+    base_uri 可指定解析（及新建）的根目录，默认探测 peer / 用户级记忆目录。
     """
     if not uri and name:
-        uri, resp = _resolve_for_write(name, mode)
+        uri, resp = _resolve_for_write(name, mode, base_uri)
         if resp is not None:
             return resp
     try:
@@ -608,15 +608,16 @@ def openviking_write_file(uri: str, content: str, mode: str = "replace", name: s
         return error(f"写入失败 - {str(e)}", code="internal")
 
 
-def openviking_forget(uri: str, recursive: bool = False, name: str = "") -> str:
+def openviking_forget(uri: str, recursive: bool = False, name: str = "", base_uri: str = "") -> str:
     """从 OpenViking 删除（遗忘）文件或目录。
 
     对齐 MCP forget：recursive=True 时递归删除目录及其所有子项。
-    仅给文件名 name（不给 uri）时先按名解析，且要求唯一命中（删除不接受歧义）。
+    仅给文件名 name（不给 uri）时先按名解析，且要求唯一命中（删除不接受歧义）；
+    base_uri 可指定解析根目录（默认探测 peer / 用户级记忆目录）。
     注意：此操作不可撤销。
     """
     if not uri and name:
-        uri, resp = _resolve_single(name)
+        uri, resp = _resolve_single(name, base_uri)
         if resp is not None:
             return resp
     if not uri or not uri.strip():
