@@ -727,8 +727,10 @@ def openviking_load_profile() -> str:
     """会话开始时拉取可用记忆索引，返回 <openviking-context source="profile"> 块。
 
     对齐官方 DSH 插件的 session-start profile 注入：让模型每轮都知道记忆库里
-    大致有哪些主题，而不是盲搜。仅新建会话时调用一次。
+    大致有哪些主题，而不是盲搜。仅新建会话时调用一次。开关见 OV_PROFILE_ENABLED。
     """
+    if not config.OV_PROFILE_ENABLED:
+        return ""
     try:
         user = os.environ.get('OPENVIKING_USER', '')
         agent = openviking_peer_id()

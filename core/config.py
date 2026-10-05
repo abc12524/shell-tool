@@ -83,6 +83,8 @@ OV_RECALL_PEER_SCOPE = os.environ.get('OV_RECALL_PEER_SCOPE', 'all')
 OV_WORKSPACE_PEER = os.environ.get('OV_WORKSPACE_PEER', 'false') in ('1', 'true', 'True', 'yes')
 # 显式指定 peer（优先级最高，覆盖上面两项）
 OV_PEER_ID = os.environ.get('OV_PEER_ID', '')
+# 会话开始是否注入可用记忆索引（<openviking-context source="profile"> 主题概览）：false=关闭
+OV_PROFILE_ENABLED = os.environ.get('OV_PROFILE_ENABLED', 'true') in ('1', 'true', 'True', 'yes')
 # 会话开始记忆索引块字符预算
 OV_PROFILE_TOKEN_BUDGET = int(os.environ.get('OV_PROFILE_TOKEN_BUDGET', '1000'))
 # 召回 query 最小长度，过短则跳过
