@@ -664,7 +664,10 @@ def openviking_load_context(messages, session_id=None) -> str:
     对齐官方 DSH 插件：recall 发生在每一步（pre-step），query 取整批消息
     （用户输入 + 工具结果 + 工具调用名），而非仅首轮问题；工具结果回来后
     下一轮会自动带上它重新召回。session_id 用于客户端跨轮去重（见 _recall_dedup_filter）。
+    自动召回开关见 OV_ENABLED（关闭时不注入，但模型仍可主动用 ov 工具搜索）。
     """
+    if not config.OV_ENABLED:
+        return ""
     try:
         query = build_recall_query(messages)
         if len(query) < config.OV_MIN_QUERY_LENGTH:
@@ -727,9 +730,9 @@ def openviking_load_profile() -> str:
     """会话开始时拉取可用记忆索引，返回 <openviking-context source="profile"> 块。
 
     对齐官方 DSH 插件的 session-start profile 注入：让模型每轮都知道记忆库里
-    大致有哪些主题，而不是盲搜。仅新建会话时调用一次。开关见 OV_PROFILE_ENABLED。
+    大致有哪些主题，而不是盲搜。仅新建会话时调用一次。开关见 OV_ENABLED。
     """
-    if not config.OV_PROFILE_ENABLED:
+    if not config.OV_ENABLED:
         return ""
     try:
         user = os.environ.get('OPENVIKING_USER', '')
