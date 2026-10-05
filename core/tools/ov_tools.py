@@ -65,6 +65,62 @@ def _ov_headers():
     }
 
 
+# HTTP 状态码 → 语义化错误 code（与 name 解析的 not_found/ambiguous 风格统一）
+_HTTP_STATUS_CODES = {
+    400: "invalid_argument",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    405: "method_not_allowed",
+    409: "already_exists",
+    413: "payload_too_large",
+    415: "unsupported_media_type",
+    422: "invalid_argument",
+    429: "rate_limited",
+    500: "server_error",
+    502: "bad_gateway",
+    503: "unavailable",
+    504: "gateway_timeout",
+}
+# 错误信息里可能带内网地址/URL，统一脱敏后再回传给模型
+_URL_RE = re.compile(r'https?://[^\s"\')]+', re.I)
+_IP_RE = re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b')
+
+
+def _sanitize(text):
+    """脱敏错误文本中的 URL / IP，避免把内网地址泄露给上层。"""
+    text = _URL_RE.sub("<ov>", str(text or ""))
+    return _IP_RE.sub("<ov>", text)
+
+
+def _http_failure(exc):
+    """把 requests.HTTPError 映射为语义化错误信封（隐藏 URL/IP，尽量透出后端 message）。"""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    code = _HTTP_STATUS_CODES.get(status, "http")
+    detail = ""
+    if resp is not None:
+        try:
+            data = resp.json()
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict):
+                detail = err.get("message") or err.get("code") or ""
+            elif isinstance(err, str):
+                detail = err
+            elif data.get("detail"):
+                detail = str(data.get("detail"))
+            elif data.get("message"):
+                detail = str(data.get("message"))
+    detail = _sanitize(detail).strip()
+    msg = f"OpenViking 请求失败 (HTTP {status})"
+    if detail:
+        msg += f" - {detail}"
+    return json.loads(error(msg, code=code))
+
+
 def _ov_get(path, params=None, timeout=15):
     """OpenViking GET 请求；失败返回错误信封 dict（不抛异常）"""
     try:
@@ -75,9 +131,9 @@ def _ov_get(path, params=None, timeout=15):
     except requests.Timeout:
         return json.loads(error("OpenViking 请求超时", code="timeout"))
     except requests.HTTPError as e:
-        return json.loads(error(f"OpenViking HTTP 错误 - {e}", code="http"))
+        return _http_failure(e)
     except Exception as e:
-        return json.loads(error(f"OpenViking 请求失败 - {str(e)}", code="transport"))
+        return json.loads(error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport"))
 
 
 def _ov_post(path, payload, timeout=15):
@@ -90,9 +146,9 @@ def _ov_post(path, payload, timeout=15):
     except requests.Timeout:
         return json.loads(error("OpenViking 请求超时", code="timeout"))
     except requests.HTTPError as e:
-        return json.loads(error(f"OpenViking HTTP 错误 - {e}", code="http"))
+        return _http_failure(e)
     except Exception as e:
-        return json.loads(error(f"OpenViking 请求失败 - {str(e)}", code="transport"))
+        return json.loads(error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport"))
 
 
 def _ov_delete(path, params=None, timeout=15):
@@ -105,9 +161,9 @@ def _ov_delete(path, params=None, timeout=15):
     except requests.Timeout:
         return json.loads(error("OpenViking 请求超时", code="timeout"))
     except requests.HTTPError as e:
-        return json.loads(error(f"OpenViking HTTP 错误 - {e}", code="http"))
+        return _http_failure(e)
     except Exception as e:
-        return json.loads(error(f"OpenViking 请求失败 - {str(e)}", code="transport"))
+        return json.loads(error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport"))
 
 
 # ============= 官方结构对齐：召回/注入辅助 =============
@@ -179,9 +235,10 @@ def _search_payload(query, score_threshold=None, limit=None):
 
 # ============= 按文件名解析 URI =============
 def _memory_base(category: str = "") -> str:
-    """当前 peer 的记忆目录根，与 openviking_remember 的写入路径保持一致。
+    """当前 peer 的隔离记忆目录根。
 
     viking://user/<user>/peers/<agent>/memories/[_<category>/]
+    是否作为读写落点取决于是否启用隔离（见 _active_memory_base）。
     """
     user = os.environ.get('OPENVIKING_USER', '')
     agent = os.environ.get('OPENVIKING_AGENT', 'default')
@@ -198,16 +255,21 @@ def _ensure_parent_dirs(uri: str) -> None:
 
 
 def _memory_search_bases():
-    """按名检索时依次尝试的记忆根目录。
+    """按名检索时依次尝试的根目录。
 
-    首选当前 peer 目录（与 openviking_remember 写入位置一致），再回退用户级
-    记忆目录（官方默认布局 viking://user/<user>/memories/）。两者可能因 peer
-    配置不同而只有一个存在，顺序探测可让“只传文件名”在两种布局下都命中。
+    顺序：当前 peer 记忆目录（与 openviking_remember 写入位置一致）→ 用户级记忆
+    目录（官方默认布局 viking://user/<user>/memories/）→ 公共资源库
+    viking://resources/。不同部署的记忆可能只存在于其中一个，顺序探测让“只传文件名”
+    在这些布局下都能命中；resources 放最后，避免抢在记忆目录之前命中同名资源。
     """
     user = os.environ.get('OPENVIKING_USER', '')
     peer_base = _memory_base()
     user_base = f"viking://user/{user}/memories/"
-    return [peer_base] if peer_base == user_base else [peer_base, user_base]
+    bases = []
+    for b in (peer_base, user_base, "viking://resources/"):
+        if b and b not in bases:
+            bases.append(b)
+    return bases
 
 
 def _extract_glob_matches(result):
@@ -236,9 +298,10 @@ def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20) -> s
     服务端没有“只传文件名即可读写”的接口（content/read、content/write 的 uri 均必填），
     但提供 /api/v1/search/glob 做文件名模式匹配，这里用它完成解析。
     - name: 文件名或片段，如 "ov删除工具" / "ov删除工具.md"
-    - base_uri: 检索根目录；留空时依次探测 peer / 用户级记忆目录（见 _memory_search_bases）
+    - base_uri: 检索根目录；留空时依次探测 peer 记忆 → 用户级记忆 → 公共资源库（见 _memory_search_bases）
     - limit: 最多返回的候选数（1~200）
-    命中 0 / 多命中时交由调用方（read/write/forget）决定如何处理。
+    返回 result.base_uri 为“实际命中的根”，result.searched_bases 为本次搜索过的全部根
+    （未命中时 base_uri 回退为第一个根）。命中 0 / 多命中时交由调用方决定如何处理。
     """
     name = (name or "").strip()
     if not name:
@@ -251,7 +314,7 @@ def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20) -> s
     pattern = f"**/*{name}*"
     bases = [base_uri] if base_uri else _memory_search_bases()
 
-    matched_base, matches, first_result = bases[0], [], None
+    matched_base, matches = bases[0], []
     for base in bases:
         try:
             result = _ov_post(
@@ -260,11 +323,9 @@ def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20) -> s
                 timeout=15,
             )
         except Exception as e:
-            return error(f"解析文件名失败 - {str(e)}", code="internal")
+            return error(f"解析文件名失败 - {_sanitize(e)}", code="internal")
         if is_error(result):
             return json.dumps(result, ensure_ascii=False)
-        if first_result is None:
-            first_result = result
         found = _extract_glob_matches(result)
         if found:
             matched_base, matches = base, found
@@ -272,6 +333,7 @@ def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20) -> s
     return ok({
         "name": name,
         "base_uri": matched_base,
+        "searched_bases": bases,
         "pattern": pattern,
         "count": len(matches),
         "matches": matches,
@@ -294,10 +356,42 @@ def _resolve_single(name: str, base_uri: str = ""):
         return matches[0], None
     if not matches:
         return "", error(f"未找到匹配文件: {name}", code="not_found",
-                         name=name, base_uri=res.get("base_uri", ""))
+                         name=name, base_uri=res.get("base_uri", ""),
+                         searched_bases=res.get("searched_bases"))
     return "", error(
         f"文件名 '{name}' 匹配到 {len(matches)} 个文件，请改用完整 uri 或更精确的名字",
         code="ambiguous", name=name, matches=matches)
+
+
+def _active_memory_base():
+    """默认记忆根（读/写/profile 统一落点），使各入口落在同一处。
+
+    - 隔离模式（OV_PEER_ID / OV_WORKSPACE_PEER 开启）：固定用 peer 目录，维持项目隔离；
+    - 非隔离：在 peer 记忆 → 用户级记忆 中取第一个**有内容**(count>0)的根，都空则取第一个
+      存在的，都不存在则回落主 peer 根（由 _ensure_parent_dirs 逐级建目录）。
+    只用记忆目录、不含 resources，避免把新记忆误建进公共资源库。
+    """
+    if config.OV_PEER_ID or config.OV_WORKSPACE_PEER:
+        return _memory_base()
+    user = os.environ.get('OPENVIKING_USER', '')
+    candidates = [_memory_base(), f"viking://user/{user}/memories/"]
+    first_existing = None
+    for base in candidates:
+        stat = _ov_get("/api/v1/fs/stat", params={"uri": base}, timeout=10)
+        if is_error(stat):
+            continue
+        res = stat.get("result") if isinstance(stat, dict) else None
+        if not isinstance(res, dict):
+            continue
+        if first_existing is None:
+            first_existing = base
+        try:
+            count = int(res.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            return base
+    return first_existing or _memory_base()
 
 
 def _resolve_for_write(name: str, mode: str, base_uri: str = ""):
@@ -315,7 +409,7 @@ def _resolve_for_write(name: str, mode: str, base_uri: str = ""):
             return "", resp
         if "." not in rel.split("/")[-1]:
             rel += ".md"
-        new_uri = (base_uri or _memory_base()) + rel
+        new_uri = (base_uri or _active_memory_base()) + rel
         _ensure_parent_dirs(new_uri)
         return new_uri, None
     return "", resp
@@ -490,7 +584,7 @@ def openviking_remember(category: str, name: str, content: str) -> str:
             f"未知分类: {category}，可选: preferences/entities/events/experiences",
             code="bad_category",
         )
-    uri = _memory_base(category) + f"{name}.md"
+    uri = _active_memory_base() + f"{category}/{name}.md"
 
     try:
         # 递归创建父目录（逐级 mkdir，忽略已存在的错误）
@@ -503,8 +597,8 @@ def openviking_remember(category: str, name: str, content: str) -> str:
             timeout=30,
         )
         if is_error(write_result):
-            err_text = write_result.get("error", "")
-            if "NOT_FOUND" in err_text or "not found" in err_text.lower():
+            err_text = str(write_result.get("error", ""))
+            if write_result.get("code") == "not_found" or "NOT_FOUND" in err_text or "not found" in err_text.lower():
                 write_result = _ov_post(
                     "/api/v1/content/write",
                     {"uri": uri, "content": content, "mode": "create", "wait": True},
@@ -736,9 +830,7 @@ def openviking_load_profile() -> str:
     if not config.OV_ENABLED:
         return ""
     try:
-        user = os.environ.get('OPENVIKING_USER', '')
-        agent = openviking_peer_id()
-        root = f"viking://user/{user}/peers/{agent}/memories/"
+        root = _active_memory_base()
         tree = _ov_get("/api/v1/fs/tree", params={"uri": root})
         if is_error(tree):
             return ""

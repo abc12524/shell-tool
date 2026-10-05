@@ -17,9 +17,13 @@
 #     get_session     获取 Session 详情    {session_id}
 #     list_sessions   列出所有 Session     {}
 #   说明: read/write_file/forget 支持只传 name（文件名或片段），程序用服务端
-#         /api/v1/search/glob 解析出完整 viking:// uri，无需手写完整路径；
-#         唯一命中才执行，多命中返回候选，write_file(mode=create) 未命中则新建。
-#         解析根目录默认探测 peer / 用户级记忆目录，可用 base_uri 显式指定。
+#         /api/v1/search/glob 解析出完整 viking:// uri，无需手写完整路径。
+#         解析默认依次探测 peer 记忆 → 用户级记忆 → 公共资源库(resources)；
+#         唯一命中才执行，多命中返回候选，write_file(mode=create) 未命中则新建
+#         （落点取“有内容的记忆根”，与读取默认根一致；不会建进 resources）。
+#         解析根可用 base_uri 显式指定；resolve 会回传 searched_bases 便于排错。
+#   注意: 写入后语义/向量索引是异步排队（semantic skipped / vector queued），
+#         刚写完立即 search 可能检索不到，稍候再查。
 #   示例: {"action": "search", "query": "用户偏好", "limit": 3}
 #         {"action": "write_file", "name": "ov删除工具", "content": "...", "mode": "create"}
 from core.tools.ov_tools import (
