@@ -1,5 +1,5 @@
 # skill: script
-# description: 脚本/代码增删改查（CRUD）+ 结构骨架（精确字符串替换，对齐 edit 工具）
+# description: 脚本/代码增删改查（CRUD）+ 结构骨架
 # status: enable
 # usage:
 #   arguments.action = read | outline | add | edit | delete
