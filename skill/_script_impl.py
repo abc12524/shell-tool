@@ -2,7 +2,7 @@
 """脚本类工具：script_editor —— 面向文件的脚本 增 / 删 / 改 / 查（CRUD）+ 结构骨架
 
 数据来源只支持 file_path（本地文件）或 url（http/https，只读），由工具自行读取与编码探测，
-输出统一 UTF-8；本地文件修改会写回原路径，并先生成 .bak 备份。
+输出统一 UTF-8；本地文件修改会写回原路径。
 
 - 编码自动探测（utf-8 / BOM / gb18030 / big5 / latin-1 兜底），换行统一为 '\\n'，写回还原原换行；
 - read：支持 symbol（单个或多个）/ pattern（正则）批量、start_line~end_line 行范围，输出带行号；
@@ -16,8 +16,6 @@ import ast
 import difflib
 import os
 import re
-import shutil
-import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse
@@ -523,27 +521,6 @@ def fetch_url(url: str, timeout: int = 30):
     return text.replace("\r\n", "\n").replace("\r", "\n"), enc, None
 
 
-def backup_file(file_path: str):
-    """写回前生成备份，返回 (backup_path, err)。
-
-    首次备份写 <file>.bak（永久保留原始版本），之后每次改用时间戳
-    <file>.bak.YYYYmmddHHMMSS（同名时追加序号），避免历史被覆盖。
-    """
-    try:
-        bak = file_path + ".bak"
-        if os.path.exists(bak):
-            stamp = time.strftime("%Y%m%d%H%M%S")
-            bak = f"{file_path}.bak.{stamp}"
-            n = 1
-            while os.path.exists(bak):
-                bak = f"{file_path}.bak.{stamp}.{n}"
-                n += 1
-        shutil.copy2(file_path, bak)
-        return bak, None
-    except OSError as e:
-        return None, f"备份失败 - {e}"
-
-
 # ============================ 读取（按符号 / 正则 / 行范围 / 骨架） ============================
 
 DEFAULT_LIMIT = 400
@@ -852,7 +829,7 @@ def _make_diff(before: str, after: str):
 
 def _finish(file_path, encoding, newline, action, count, count_key, new_src,
             before=None, dry_run=False):
-    """写回前备份，再落盘；返回摘要 + 变更 diff（不含全量源码，省 token）。
+    """落盘并返回摘要 + 变更 diff（不含全量源码，省 token）。
 
     before 为修改前内容时附带 unified diff；dry_run=True 时只回显 diff 不落盘。
     """
@@ -866,14 +843,10 @@ def _finish(file_path, encoding, newline, action, count, count_key, new_src,
         payload["written"] = False
         payload["dry_run"] = True
         return ok(payload)
-    bak, berr = backup_file(file_path)
-    if berr:
-        return error(berr, code="io_error")
     werr = write_file(file_path, new_src, encoding, newline)
     if werr:
         return error(werr, code="io_error")
     payload["written"] = True
-    payload["backup"] = bak
     return ok(payload)
 
 
@@ -885,7 +858,7 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
     """脚本编辑 + 结构化读取工具（对齐 OpenViking / DSH 规范信封）。
 
     数据来源（二选一）：file_path（本地文件，可写）或 url（http/https，只读）。
-    工具自行读取并探测编码，输出统一 UTF-8；本地修改写回原文件并生成 .bak 备份。
+    工具自行读取并探测编码，输出统一 UTF-8；本地修改写回原文件。
 
     动作：
     - read    : symbol（单个/数组）或 pattern（正则）批量取符号；或 start_line~end_line

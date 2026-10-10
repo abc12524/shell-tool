@@ -3,7 +3,7 @@
 # status: enable
 # usage:
 #   arguments.action = read | outline | add | edit | delete
-#   数据来源二选一：file_path（本地文件，可写；改后写回并生成 .bak）或 url（http/https，只读）
+#   数据来源二选一：file_path（本地文件，可写；改后写回）或 url（http/https，只读）
 #   read   : symbol（单个/数组）或 pattern（正则）批量取符号；或 start_line~end_line 行范围；
 #            都不给则返回结构骨架。输出带行号，超 limit 截断并给续读提示
 #   outline: 返回结构骨架（每个符号带起止行号）

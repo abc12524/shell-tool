@@ -6,7 +6,7 @@
 
 - **系统命令执行** — 跨平台执行 Linux/macOS (bash) 与 Windows (PowerShell/CMD) 命令
 - **技能体系（skill）** — 除系统工具外，OpenViking 记忆（`ov`）、脚本/代码编辑（`script`）、百度搜索（`baidu_search`）均下沉为 `skill/` 目录脚本；按脚本头部标准结构自动注册，新增能力只需新增脚本，无需改动核心
-- **脚本增删改查** — 数据源为本地 `file_path`（可写，改后写回并生成 `.bak` 备份）或 http(s) `url`（只读），工具自动探测编码（utf-8/gb18030/big5 等）；read 支持按 `symbol`（单个/数组）/`pattern` 正则批量、按 `start_line~end_line` 取片段（带行号、可 `limit` 分页），或返回带行号的 `outline` 骨架；改/增/删采用精确字符串替换（对齐 edit 工具，唯一匹配、支持 `replace_all`）
+- **脚本增删改查** — 数据源为本地 `file_path`（可写，改后写回原文件）或 http(s) `url`（只读），工具自动探测编码（utf-8/gb18030/big5 等）；read 支持按 `symbol`（单个/数组）/`pattern` 正则批量、按 `start_line~end_line` 取片段（带行号、可 `limit` 分页），或返回带行号的 `outline` 骨架；改/增/删采用精确字符串替换（对齐 edit 工具，唯一匹配、支持 `replace_all`）
 - **百度搜索** — 通过百度千帆引擎搜索网页 / 查询百科
 - **OpenViking 记忆** — 语义搜索历史记忆、保存用户偏好/项目信息/决策、读取与写入记忆文件、Session 管理
 - **对话持久化** — 先落本地 SQLite（唯一读写源），再幂等同步到在线 MySQL，支持继续/新建/指定会话
