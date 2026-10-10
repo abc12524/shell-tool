@@ -1,5 +1,6 @@
 # skill: script
 # description: 脚本/代码增删改查（CRUD）+ 结构骨架（精确字符串替换，对齐 edit 工具）
+# status: enable
 # usage:
 #   arguments.action = read | outline | add | edit | delete
 #   数据来源二选一：file_path（本地文件，可写；改后写回并生成 .bak）或 url（http/https，只读）

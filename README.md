@@ -46,6 +46,7 @@ shell-tool/
 ```python
 # skill: my_skill
 # description: 一句话说明
+# status: enable            # 可选：enable（默认）/ disable
 # usage:
 #   arguments.foo = ...
 #   示例: {"foo": "bar"}
@@ -56,6 +57,9 @@ def run(arguments: dict) -> str:
 
 模型侧只暴露一个 `skill` 工具：`all=true` 列出全部 skill，传 `skill=<名称>` 查看用法，
 传 `skill=<名称>` + `arguments={...}` 执行。未声明 `# skill:` 的脚本不会被注册。
+
+`# status: disable` 的 skill 不进入 skill 工具描述与系统提示词（即不对 LLM 披露），
+但仍可按名称查看用法 / 执行，执行逻辑不变。
 ```
 
 ## 安装
@@ -143,6 +147,10 @@ python dp.py -s
 # 覆盖并写回 .env 的密钥 / 模型（本次及后续运行均生效）
 python dp.py -k sk-xxxxxxxx
 python dp.py -m deepseek-v4-pro "换个模型回答"
+
+# 开关某 skill 的 status（改脚本头部，不进入对话；disable 即不向 LLM 披露）
+python dp.py -S ov disable
+python dp.py -S ov enable
 
 # 查看帮助
 python dp.py

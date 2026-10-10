@@ -1,5 +1,6 @@
 # skill: ov
 # description: OpenViking 外置记忆统一入口（语义搜索 / 写入 / 读取 / 目录 / 遗忘 / Session）
+# status: enable
 # usage:
 #   arguments.action 指定操作：
 #     search          上下文感知语义搜索   {query, score_threshold?, limit?}

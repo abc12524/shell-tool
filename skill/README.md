@@ -31,7 +31,8 @@
    ```
 
 3. 可选 `# description:`（一句话说明），建议放在 `# skill:` 之后。
-4. 可选 `# usage:`，其后**每一行 `#` 注释**都作为用法文本（保留缩进，去掉行首 `#` 和一个空格）。
+4. 可选 `# status:`，取值 `enable`（默认）或 `disable`；见 §2.3。
+5. 可选 `# usage:`，其后**每一行 `#` 注释**都作为用法文本（保留缩进，去掉行首 `#` 和一个空格）。
 
 解析器精确行为（`core/tools/skill_tool.py`）：
 
@@ -40,6 +41,7 @@
 | 扫描范围 | 文件前 300 行 |
 | 名称 | `^#\s*skill\s*:\s*(\S+)\s*$`（\S+ ⇒ **不能含空格**） |
 | 说明 | `^#\s*description\s*:\s*(.*)$`，仅在 `usage` 之前生效 |
+| 状态 | `^#\s*status\s*:\s*(\S+)\s*$`，仅在 `usage` 之前生效；缺省/无法识别均按 `enable` |
 | 用法 | `^#\s*usage\s*:\s*(.*)$` 起，其后注释行原样收集（去掉 `#` 与一个空格） |
 | 终止 | 遇到不以 `#` 开头的行即停止解析头部 |
 | 未找到名称 | 返回 None ⇒ **不注册** |
@@ -56,6 +58,18 @@
 
 4. 头部块之后才是普通代码（docstring、`import` 等）。
 
+### 2.3 status：是否对 LLM 披露
+
+`# status: enable | disable`（缺省 = `enable`）只控制**是否把该 skill 披露给模型**：
+
+- 披露位置有二：原生 `skill` 工具的 schema 描述（`core/tools/__init__.py`）与系统提示词
+  （`core/main.py:build_system_prompt`）；两处都只列 `enable` 的 skill。
+- **不影响执行逻辑**：`disable` 的 skill 仍在注册表 `REGISTRY` 中，按名称仍可
+  `skill='名称'` 查看用法与执行；只是模型在工具列表 / 系统提示词里看不到它，不会被引导去调用。
+- 用途：临时下线某个能力而不删脚本，或不希望模型主动调用（如调试 / 高危工具）。
+- 快捷开关：`python dp.py -S <名称> <enable|disable>` 直接改写对应脚本头部的
+  `# status:` 行，无需手工编辑文件（不进入对话）。
+
 ---
 
 ## 3. 脚本模板
@@ -63,6 +77,7 @@
 ```python
 # skill: my_name
 # description: 一句话说明这个 skill 做什么
+# status: enable
 # usage:
 #   arguments.action = a | b
 #     a  说明
@@ -114,7 +129,7 @@ def run(arguments):
    - **内联**：把核心逻辑搬进 `skill/<name>.py` 的 `run()`。适合短小、一次性脚本。
    - 二者都把"参数解析 / IO"移出，只保留可复用的函数体。
 
-3. **写头部**：`# skill:` → `# description:` → `# usage:`（用法要写清每个参数的取值与示例）。
+3. **写头部**：`# skill:` → `# description:` →（可选）`# status:` → `# usage:`（用法要写清每个参数的取值与示例）。
 
 4. **写 `run`**：`arguments` → 取参（带默认值）→ 调业务函数 → `return ok(...)` / `return error(...)`。
    取参统一用 `a.get("key", default)`，避免 KeyError。
@@ -188,6 +203,7 @@ def run(arguments):
 | `run` 里 `sys.exit` / 依赖 `print` 返回 | 结果丢失或进程受影响 | `return` 信封 |
 | 返回非 JSON 的裸文本 | 下游解析异常 | 用 `ok()`/`error()` |
 | 把助手模块也加了 `# skill:` | 多注册一个无用 skill | 助手模块不加头部 |
+| `# status:` 写在 `# usage:` 之后 | 状态不生效（默认 enable） | 状态声明放在 `usage` 之前 |
 
 ---
 
@@ -217,6 +233,7 @@ python -c "from core.tools.skill_tool import skill_tool; print(skill_tool(skill=
 - [ ] 文件在 `skill/`，`*.py`，不以 `_` 开头
 - [ ] 头部在文件最顶、连续 `#`，含 `# skill: <无空格名称>`
 - [ ] 有 `# description:` 与 `# usage:`（含参数取值与示例）
+- [ ] 如需隐藏，加 `# status: disable`（放在 `usage` 之前）；默认不写即披露
 - [ ] 定义了模块级 `def run(arguments)`
 - [ ] 取参用 `a.get(..., default)`；返回 `ok()`/`error()` 信封
 - [ ] 无 import 期副作用；无 `sys.exit`；结果靠 `return` 而非 `print`

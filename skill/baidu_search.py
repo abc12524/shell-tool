@@ -1,5 +1,6 @@
 # skill: baidu_search
 # description: 百度搜索 / 百科查询（百度千帆引擎，进程内直连）
+# status: enable
 # usage:
 #   arguments.mode = raw | summary | search | baike | baikelist | quota
 #     raw        百度搜索原始结果（默认，50 次/天）

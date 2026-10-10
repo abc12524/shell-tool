@@ -11,7 +11,7 @@ import re
 
 from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
-from .skill_tool import skill_tool, list_skills
+from .skill_tool import skill_tool, disclosed_skills
 from .. import config
 from .. import events
 
@@ -27,8 +27,9 @@ __all__ = [
 # 工具定义列表（符合 OpenAI/DeepSeek 的 tool 格式）
 # 原生 tool：系统信息 / 命令执行 / skill 统一入口（skill 列表由 skill/ 目录自动注册）。
 # skill 名称与说明摘要由注册表运行时生成，新增脚本即自动出现在工具描述中。
-_SKILL_SUMMARY = "、".join(f"{name}={desc}" for name, desc in list_skills().items()) or "(空)"
-_SKILL_NAMES = " / ".join(list_skills()) or "(空)"
+# 仅披露 status 非 disable 的 skill（disclosed_skills）；disable 者不进入工具 schema。
+_SKILL_SUMMARY = "、".join(f"{name}={desc}" for name, desc in disclosed_skills().items()) or "(空)"
+_SKILL_NAMES = " / ".join(disclosed_skills()) or "(空)"
 
 TOOLS = [
     {

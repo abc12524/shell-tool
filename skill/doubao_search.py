@@ -1,5 +1,6 @@
 # skill: doubao_search
 # description: Feedcoop 豆包搜索 API（web_search / global_search），返回结构化网页结果
+# status: enable
 # usage:
 #   arguments.query = 搜索关键词（必填，1~100 字符，不支持多词）
 #   arguments.count = 返回条数，默认 5；web 上限 50、image 上限 5，global 服务端恒返 10 条、由本地按 count 截断
