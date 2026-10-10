@@ -219,6 +219,12 @@ def disclosed_skills():
     return {name: meta["description"] for name, meta in REGISTRY.items() if _is_enabled(meta)}
 
 
+def skills_overview():
+    """列出全部已注册 skill：name -> (status, description)，供 CLI 展示。"""
+    return {name: (meta.get("status", "enable"), meta["description"])
+            for name, meta in REGISTRY.items()}
+
+
 def get_usage(name):
     """返回某个 skill 的用法"""
     meta = REGISTRY.get(name)

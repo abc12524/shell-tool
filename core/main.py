@@ -15,7 +15,7 @@ from . import billing
 from . import events
 from .console import console, render_table
 from .tools import get_system_info
-from .tools.skill_tool import disclosed_skills, set_status
+from .tools.skill_tool import disclosed_skills, set_status, skills_overview
 from .tools.ov_tools import (
     openviking_load_context,
     openviking_load_profile,
@@ -29,7 +29,7 @@ USAGE = """使用方法：python dp.py [选项] [问题]
   直接加问题   → 默认同一对话（复用最近的活跃会话）
   -n, --new    → 终结当前对话，并新开一个对话
   -s, --session [id] → 不带 id：列出最近 5 条会话；带 id：继续指定会话（可指定历史会话）
-  -S, --skill <名称> <enable|disable> → 开关某 skill 的 status（改脚本头部，不进入对话）
+  -S, --skill [名称] [enable|disable] → 不带参数：列出全部 skill 及 status；带参数：开关该 skill 的 status
   -k, --key <key>    → 覆盖 DEEPSEEK_API_KEY，并写回 .env
   -m, --model <name> → 覆盖 DEEPSEEK_MODEL，并写回 .env
   不加参数     → 查看此帮助
@@ -37,13 +37,15 @@ USAGE = """使用方法：python dp.py [选项] [问题]
 
 
 def parse_args(argv):
-    """解析命令行参数，返回 (new_flag, session_id, list_sessions, question, api_key, model, skill_status)"""
+    """解析命令行参数，返回
+    (new_flag, session_id, list_sessions, question, api_key, model, skill_status, show_skills)"""
     new_flag = False
     sid = None
     list_sessions = False
     api_key = None
     model = None
     skill_status = None
+    show_skills = False
     question_parts = []
     i = 1
     while i < len(argv):
@@ -56,8 +58,13 @@ def parse_args(argv):
                     and not argv[i + 2].startswith('-')):
                 skill_status = (argv[i + 1], argv[i + 2])
                 i += 3
+            elif i + 1 >= len(argv) or argv[i + 1].startswith('-'):
+                # 不带参数 → 列出全部 skill 及 status
+                show_skills = True
+                i += 1
             else:
-                print("⚠️  -S/--skill 需要 <名称> <enable|disable>，例如：-S ov disable")
+                print("⚠️  -S/--skill 需要 <名称> <enable|disable>，例如：-S ov disable"
+                      "（不带参数则列出全部 skill）")
                 sys.exit(1)
         elif a in ('-s', '--session'):
             if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
@@ -84,7 +91,19 @@ def parse_args(argv):
         else:
             question_parts.append(a)
             i += 1
-    return new_flag, sid, list_sessions, ' '.join(question_parts), api_key, model, skill_status
+    return (new_flag, sid, list_sessions, ' '.join(question_parts),
+            api_key, model, skill_status, show_skills)
+
+
+def print_skills():
+    """列出全部 skill 及其 status（供 -S 无参数查看）"""
+    overview = skills_overview()
+    if not overview:
+        console.print("暂无已注册 skill", style="dim")
+        return
+    rows = [(name, f"{status} · {desc}") for name, (status, desc) in sorted(overview.items())]
+    render_table(f"🧰 已注册 skill（{len(rows)}）", rows)
+    console.print("开关：python dp.py -S <名称> <enable|disable>", style="dim")
 
 
 def resolve_session(new_flag, sid):
@@ -194,8 +213,14 @@ def main():
 
 
 async def _async_main():
-    new_flag, sid, list_sessions, question, api_key, model, skill_status = parse_args(sys.argv)
+    (new_flag, sid, list_sessions, question, api_key, model,
+     skill_status, show_skills) = parse_args(sys.argv)
     asked_at = datetime.now(timezone.utc)
+
+    # -S/--skill 无参数：列出全部 skill 及 status 后退出
+    if show_skills:
+        print_skills()
+        sys.exit(0)
 
     # -S/--skill：开关某 skill 的 status 后直接退出（不建会话、不调用模型）
     if skill_status:

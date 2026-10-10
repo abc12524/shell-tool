@@ -148,6 +148,9 @@ python dp.py -s
 python dp.py -k sk-xxxxxxxx
 python dp.py -m deepseek-v4-pro "换个模型回答"
 
+# 列出全部 skill 及 status / 说明
+python dp.py -S
+
 # 开关某 skill 的 status（改脚本头部，不进入对话；disable 即不向 LLM 披露）
 python dp.py -S ov disable
 python dp.py -S ov enable
