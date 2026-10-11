@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 from rich.console import Console
 from rich.live import Live
@@ -107,39 +108,81 @@ if _API_MODE:
 console = Console(highlight=False)
 
 
-class LiveMarkdown:
-    """流式 Markdown 渲染器。
+# 终端下 Live 每秒最多重绘次数。cmd/conhost 对「上移光标 + 清行 + 重画」较慢，
+# 逐 token 重绘（可达数十次/秒）会明显闪烁；限制到 ~8 次/秒并只重绘变化内容即可。
+_LIVE_FPS = 8
 
-    终端下用 Live 就地刷新显示；stdout 非终端（如被 Server API 捕获为管道）时，
-    改为原样转发模型增量文本——由下游 SSE 客户端负责渲染，避免服务端先渲染一遍
-    Markdown、客户端再渲染一遍导致的格式错乱。
+# 内容超过终端高度时的滚动策略：
+#   "visible"  → 不裁剪，超出部分让终端自然滚屏（跨屏内容连贯，推荐）
+#   "ellipsis" → 裁剪到屏幕高，底部以 … 占位（Rich 默认，不滚动）
+_LIVE_OVERFLOW = "visible"
+
+
+class _LiveStream:
+    """流式渲染基类：终端下节流刷新 Live，非终端下把增量原样转发给下游。
+
+    - 终端路径：关闭 Rich 自带定时刷新线程（auto_refresh=False），改由 feed 按
+      时间节流触发 refresh——既限制重绘频率（避免每个 token 全量重绘造成闪烁），
+      又保证 Markdown/Text 只在内容真正变化时重建（无增量则完全不重绘）。
+    - 非终端路径（被 Server API 捕获为管道时）：把增量原样交给下游渲染，
+      避免服务端先渲染一遍、客户端再渲染一遍导致的格式错乱。
     """
+
+    _kind = "content"   # 子类覆盖：passthrough 时的事件类型
+    _fps = _LIVE_FPS    # 每秒最多重绘次数
 
     def __init__(self):
         self._buf = []
         self._live = None
+        self._last = 0.0
+        self._dirty = False
         self._passthrough = not console.is_terminal
+
+    def _render(self, text):
+        """子类覆盖：把累积文本转成 Rich 可渲染对象"""
+        raise NotImplementedError
 
     def start(self):
         self._buf.clear()
+        self._last = 0.0
+        self._dirty = False
         if self._passthrough:
             self._live = None
         else:
-            self._live = Live(console=console, refresh_per_second=12, transient=False)
-            self._live.start()
+            self._live = Live(
+                console=console,
+                refresh_per_second=self._fps,
+                auto_refresh=False,   # 关闭定时重绘，改为 feed 节流触发
+                transient=False,
+                vertical_overflow=_LIVE_OVERFLOW,
+            )
+            self._live.start(refresh=True)
         return self
 
     def feed(self, delta: str):
         if not delta:
             return
         self._buf.append(delta)
+        self._dirty = True
         if self._passthrough:
-            _output("content", delta)
-        else:
-            self._live.update(Markdown("".join(self._buf)))
+            _output(self._kind, delta)
+            return
+        # 节流：距上次重绘不足一个刷新周期则先攒着，下个 token 再决定
+        if time.monotonic() - self._last >= 1.0 / self._fps:
+            self._flush()
+
+    def _flush(self):
+        """把当前累积内容重绘一次（无变化则跳过）"""
+        if self._live is None or not self._dirty:
+            return
+        self._live.update(self._render("".join(self._buf)))
+        self._live.refresh()
+        self._last = time.monotonic()
+        self._dirty = False
 
     def finish(self):
-        if self._live:
+        if self._live is not None:
+            self._flush()   # 补一次，保证最后一个周期的增量也显示出来
             self._live.stop()
             self._live = None
         return "".join(self._buf)
@@ -151,37 +194,22 @@ class LiveMarkdown:
         self.finish()
 
 
-class LiveReasoning:
+class LiveMarkdown(_LiveStream):
+    """流式 Markdown 渲染器"""
+
+    _kind = "content"
+
+    def _render(self, text):
+        return Markdown(text)
+
+
+class LiveReasoning(_LiveStream):
     """流式思考过程渲染器（非终端下同样原样转发，交客户端渲染）"""
 
-    def __init__(self):
-        self._buf = []
-        self._live = None
-        self._passthrough = not console.is_terminal
+    _kind = "reasoning"
 
-    def start(self):
-        self._buf.clear()
-        if self._passthrough:
-            self._live = None
-        else:
-            self._live = Live(console=console, refresh_per_second=12, transient=False)
-            self._live.start()
-        return self
-
-    def feed(self, delta: str):
-        if not delta:
-            return
-        self._buf.append(delta)
-        if self._passthrough:
-            _output("reasoning", delta)
-        else:
-            self._live.update(Text("".join(self._buf), style="dim italic"))
-
-    def finish(self):
-        if self._live:
-            self._live.stop()
-            self._live = None
-        return "".join(self._buf)
+    def _render(self, text):
+        return Text(text, style="dim italic")
 
 
 def render_markdown(text: str):

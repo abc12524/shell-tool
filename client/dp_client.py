@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -77,16 +78,25 @@ class Renderer:
 
     正文(content)/思考(reasoning) 各用独立 Live 区流式刷新；其余事件定位格后
     按固定格式打印。切换时旧 Live 定格保留，因此思考与正文视觉上可区分。
+
+    Live 关闭自带定时刷新（auto_refresh=False），改由 _feed 按 _LIVE_FPS 节流触发：
+    避免每个 token 全量重绘造成 cmd 下闪烁，同时保证只在内容变化时重绘。
     """
+
+    _LIVE_FPS = 8
+    _LIVE_OVERFLOW = "visible"   # 超出屏幕自然滚屏、跨屏连贯（改 "ellipsis" 可还原裁剪占位）
 
     def __init__(self):
         self._live = None
         self._kind = None
         self._buf = []
+        self._last = 0.0
+        self._dirty = False
 
     # ---- Live 管理 ----
     def _stop_live(self):
         if self._live:
+            self._flush_live()   # 先补绘最后一个周期的增量，避免丢字
             self._live.stop()
             self._live = None
             self._kind = None
@@ -97,8 +107,12 @@ class Renderer:
         self._stop_live()
         self._kind = kind
         self._buf = []
-        self._live = Live(console=console, refresh_per_second=12, transient=False)
-        self._live.start()
+        self._last = 0.0
+        self._dirty = False
+        self._live = Live(console=console, refresh_per_second=self._LIVE_FPS,
+                          auto_refresh=False, transient=False,
+                          vertical_overflow=self._LIVE_OVERFLOW)
+        self._live.start(refresh=True)
 
     def _feed(self, kind, delta):
         delta = _normalize_newlines(delta)
@@ -106,10 +120,22 @@ class Renderer:
             return
         self._ensure(kind)
         self._buf.append(delta)
-        if kind == "reasoning":
-            self._live.update(Text("".join(self._buf), style="dim italic"))
+        self._dirty = True
+        if time.monotonic() - self._last >= 1.0 / self._LIVE_FPS:
+            self._flush_live()
+
+    def _flush_live(self):
+        """把当前累积内容重绘一次（无变化则跳过）"""
+        if not self._live or not self._dirty:
+            return
+        text = "".join(self._buf)
+        if self._kind == "reasoning":
+            self._live.update(Text(text, style="dim italic"))
         else:
-            self._live.update(Markdown("".join(self._buf)))
+            self._live.update(Markdown(text))
+        self._live.refresh()
+        self._last = time.monotonic()
+        self._dirty = False
 
     # ---- 普通输出 ----
     def _print(self, renderable, end="\n"):
