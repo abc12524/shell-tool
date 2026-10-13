@@ -27,6 +27,10 @@ _sync_enabled = False
 def resolve_backend():
     """初始化本地 SQLite（唯一读写源），并在配置允许时开启在线 MySQL 同步。
 
+    在线同步采用「开启即取基线」：打开在线的那一次，把当前已有记录标记为已同步、
+    记下基线 id/rowid，之后只同步基线之后新增的会话/消息——即只记录「打开在线之后」
+    的对话，而不是把历史记录全量上传。
+
     返回后端名，固定为 'sqlite'（保持既有调用方兼容）。
     """
     global _ready, _sync_enabled
@@ -42,10 +46,13 @@ def resolve_backend():
                 pass
             _init_schema_mysql()
             _sync_enabled = True
+            _baseline_online_sync()
         except Exception as e:
             events.ev_warning(f"在线 MySQL 不可用，仅使用本地 SQLite：{e}", code="mysql_unavailable")
             _sync_enabled = False
     else:
+        # 在线未启用：清除 epoch，使下次开启时重新取基线（离线期间的记录不回传）
+        _mark_online_disabled()
         _sync_enabled = False
 
     if _sync_enabled:
@@ -87,6 +94,47 @@ def _sqlite_conn():
     return conn
 
 
+# ============= 在线同步基线 =============
+def _meta_get(conn, key):
+    row = conn.execute("SELECT value FROM sync_meta WHERE key=?", (key,)).fetchone()
+    return row['value'] if row else None
+
+
+def _meta_set(conn, key, value):
+    conn.execute(
+        "INSERT INTO sync_meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)))
+
+
+def _baseline_online_sync():
+    """在线同步「开启」时取一次基线：开启之前的历史记录不再回传在线库。
+
+    仅在进入新一轮开启（sync_meta.online_epoch != '1'）时执行：把当前已有的会话/消息
+    标记为 synced=1，并记录基线 id/rowid。此后只有基线之后新增的记录才会同步——即
+    「打开在线」只记录打开之后的会话，而不是把之前所有记录全量上传。
+    """
+    with _sqlite_conn() as conn:
+        if _meta_get(conn, "online_epoch") == "1":
+            return
+        msg_max = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM chat_messages").fetchone()['m']
+        sess_max = conn.execute("SELECT COALESCE(MAX(rowid), 0) AS m FROM chat_sessions").fetchone()['m']
+        conn.execute("UPDATE chat_messages SET synced=1 WHERE id<=?", (msg_max,))
+        conn.execute("UPDATE chat_sessions SET synced=1 WHERE rowid<=?", (sess_max,))
+        _meta_set(conn, "online_epoch", "1")
+        _meta_set(conn, "online_baseline_msg", msg_max)
+        _meta_set(conn, "online_baseline_sess", sess_max)
+        conn.commit()
+
+
+def _mark_online_disabled():
+    """在线未启用时清除 epoch，使下次开启重新取基线（离线期间记录不回传）。"""
+    with _sqlite_conn() as conn:
+        if _meta_get(conn, "online_epoch") != "0":
+            _meta_set(conn, "online_epoch", "0")
+            conn.commit()
+
+
 # ============= 建表 =============
 # uid 允许为空是为了兼容旧库（旧行补 'legacy-<id>' 后再建唯一索引）
 _SQLITE_SCHEMA = """
@@ -109,6 +157,10 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     output_items_json TEXT NULL,
     created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     synced            INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sync_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
 );
 """
 
