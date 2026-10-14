@@ -224,7 +224,7 @@ def _search_payload(query, score_threshold=None, limit=None):
     与 find 完全对齐：peer 隔离只走 X-OpenViking-Peer 请求头（见 _ov_headers），
     请求体不携带任何 peer 字段。服务端 SearchRequest 无 peer_id 字段（旧实现误塞
     会被请求校验拒绝 → HTTP 400）；peer_scope 又要求 mode='context'，而本工具用
-    默认 list 模式，故同样不带。OV_RECALL_PEER_SCOPE 仅决定请求头携带的 peer 身份。
+    默认 list 模式，故同样不带。peer 身份仅由请求头决定。
     """
     return {
         "query": query,
@@ -759,9 +759,9 @@ def openviking_load_context(messages, session_id=None) -> str:
     对齐官方 DSH 插件：recall 发生在每一步（pre-step），query 取整批消息
     （用户输入 + 工具结果 + 工具调用名），而非仅首轮问题；工具结果回来后
     下一轮会自动带上它重新召回。session_id 用于客户端跨轮去重（见 _recall_dedup_filter）。
-    自动召回开关见 OV_ENABLED（关闭时不注入，但模型仍可主动用 ov 工具搜索）。
+    是否调用由调用方按 config.OV_INJECT 决定（off 时本函数直接返回空）。
     """
-    if not config.OV_ENABLED:
+    if not config.OV_INJECT_ENABLED:
         return ""
     try:
         query = build_recall_query(messages)
@@ -825,9 +825,9 @@ def openviking_load_profile() -> str:
     """会话开始时拉取可用记忆索引，返回 <openviking-context source="profile"> 块。
 
     对齐官方 DSH 插件的 session-start profile 注入：让模型每轮都知道记忆库里
-    大致有哪些主题，而不是盲搜。仅新建会话时调用一次。开关见 OV_ENABLED。
+    大致有哪些主题，而不是盲搜。仅新建会话时调用一次。开关见 config.OV_PROFILE。
     """
-    if not config.OV_ENABLED:
+    if not config.OV_PROFILE:
         return ""
     try:
         root = _active_memory_base()
@@ -1051,7 +1051,7 @@ def openviking_ensure_session(session_id):
 
 
 def openviking_capture(session_id, messages):
-    """向 OV session 批量追加消息（OV_AUTO_CAPTURE 调用），失败静默跳过。"""
+    """向 OV session 批量追加消息（config.OV_CAPTURE 开启时调用），失败静默跳过。"""
     if not session_id:
         return
     ov_msgs = _to_ov_messages(messages)

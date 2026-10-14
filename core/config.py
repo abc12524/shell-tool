@@ -76,29 +76,43 @@ OV_SEARCH_LIMIT = int(os.environ.get('OV_SEARCH_LIMIT', '3'))
 OV_FIND_THRESHOLD = float(os.environ.get('OV_FIND_THRESHOLD', '0.4'))
 OV_FIND_LIMIT = int(os.environ.get('OV_FIND_LIMIT', '3'))
 
-# ===== OpenViking 官方结构对齐（可选）=====
-# 召回 peer 隔离：all=跨项目召回；actor=仅本 workspace 隔离召回
-OV_RECALL_PEER_SCOPE = os.environ.get('OV_RECALL_PEER_SCOPE', 'all')
-# 按项目目录派生 peer（ws-<hash>），使不同项目记忆读写隔离
-OV_WORKSPACE_PEER = os.environ.get('OV_WORKSPACE_PEER', 'false') in ('1', 'true', 'True', 'yes')
-# 显式指定 peer（优先级最高，覆盖上面两项）
-OV_PEER_ID = os.environ.get('OV_PEER_ID', '')
-# OpenViking 总开关：false=关闭所有自动上下文注入（会话记忆索引 + 相关记忆召回）。
-# 仅影响自动注入；模型仍可主动调用 ov 工具搜索/读写记忆，不受本开关限制。
-OV_ENABLED = os.environ.get('OV_ENABLED', 'true') in ('1', 'true', 'True', 'yes')
-# 会话开始记忆索引块字符预算
-OV_PROFILE_TOKEN_BUDGET = int(os.environ.get('OV_PROFILE_TOKEN_BUDGET', '1000'))
-# 召回 query 最小长度，过短则跳过
-OV_MIN_QUERY_LENGTH = int(os.environ.get('OV_MIN_QUERY_LENGTH', '3'))
-# 会话自动捕获/提交开关：true=把对话写入 OV session 并 commit 触发记忆提取
-OV_AUTO_CAPTURE = os.environ.get('OV_AUTO_CAPTURE', 'false') in ('1', 'true', 'True', 'yes')
-# 自动捕获时的选择策略（对齐官方 openviking 插件）
+# ===== OpenViking 集成开关（按行为正交拆分）=====
+# —— 读取：注入 ——
+# 注入时机（一个开关决定「何时把检索结果注入上下文」）：
+#   off      = 不自动注入（模型仍可主动调用 ov 工具搜索/读写记忆）
+#   question = 每轮以用户问题为 query 检索注入（默认）
+#   step     = 每个工具轮后以整批消息为 query 检索注入
+#   both     = 两者都开
+OV_INJECT = (os.environ.get('OV_INJECT', 'question') or 'question').strip().lower()
+if OV_INJECT not in ('off', 'question', 'step', 'both'):
+    OV_INJECT = 'question'
+# 便捷派生：是否有任一自动注入开启
+OV_INJECT_ENABLED = OV_INJECT != 'off'
+# 会话开始是否注入记忆索引（profile）
+OV_PROFILE = os.environ.get('OV_PROFILE', 'false') in ('1', 'true', 'True', 'yes')
+
+# —— 写入：抓取 ——
+# true=把对话写入 OV session 并在结束时 commit 触发记忆提取
+OV_CAPTURE = os.environ.get('OV_CAPTURE', 'false') in ('1', 'true', 'True', 'yes')
+# 抓取时的选择策略（对齐官方 openviking 插件）
 OV_CAPTURE_ASSISTANT_TURNS = os.environ.get('OV_CAPTURE_ASSISTANT_TURNS', 'true') in ('1', 'true', 'True', 'yes')
 OV_CAPTURE_MAX_LENGTH = int(os.environ.get('OV_CAPTURE_MAX_LENGTH', '24000') or '24000')
 # 工具输出按原文上传，服务端 tool_output_externalization 负责截断（阈值默认 20000）
 OV_CAPTURE_TOOL_MAX_CHARS = int(os.environ.get('OV_CAPTURE_TOOL_MAX_CHARS', '1000000') or '1000000')
+
+# —— 读取：检索调参（自动注入与 ov 工具共用）——
+# 召回 query 最小长度，过短则跳过
+OV_MIN_QUERY_LENGTH = int(os.environ.get('OV_MIN_QUERY_LENGTH', '3'))
 # 跨轮去重轮数（对齐官方 dedup_turns）：最近 N 轮已注入过的记忆 URI 不再召回，避免同一份记忆反复注入刷屏；0=关闭
 OV_RECALL_DEDUP_TURNS = int(os.environ.get('OV_RECALL_DEDUP_TURNS', '5'))
+# 会话开始记忆索引块字符预算
+OV_PROFILE_TOKEN_BUDGET = int(os.environ.get('OV_PROFILE_TOKEN_BUDGET', '1000'))
+
+# —— peer 隔离 ——
+# 按项目目录派生 peer（ws-<hash>），使不同项目记忆读写隔离
+OV_WORKSPACE_PEER = os.environ.get('OV_WORKSPACE_PEER', 'false') in ('1', 'true', 'True', 'yes')
+# 显式指定 peer（优先级最高，覆盖上面项）
+OV_PEER_ID = os.environ.get('OV_PEER_ID', '')
 
 # ===== 数据库存储 =====
 # DB_ONLINE: true=在线 MySQL；false=本地 SQLite（MySQL 连接失败也会自动降级 SQLite）

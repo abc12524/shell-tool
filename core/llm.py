@@ -560,10 +560,14 @@ def build_assistant_msg(content, reasoning, tool_calls_list, output_items=None):
 
 
 def _persist(session_id, ov_session_id, msgs):
-    """统一持久化出口：写本地库 + 同步 OV 会话，保证每条消息只落一次。"""
+    """统一持久化出口：写本地库 + 同步 OV 会话，保证每条消息只落一次。
+
+    OV 会话同步（openviking_capture）由 config.OV_CAPTURE 控制，未开启时不执行；
+    本地入库不受影响。
+    """
     if session_id:
         db.append_messages(session_id, msgs)
-    if ov_session_id:
+    if config.OV_CAPTURE and ov_session_id:
         openviking_capture(ov_session_id, msgs)
 
 
@@ -624,11 +628,13 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
 
         # ---- 每步召回：工具结果回来后，基于完整批次重新检索相关记忆并注入 ----
         # 对齐官方 pre-step recall：query 含工具结果，下一次模型调用即带上新线索
-        step_recall = openviking_load_context(messages, session_id=session_id)
-        if step_recall:
-            recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
-            messages.append(recall_msg)
-            _persist(session_id, ov_session_id, [recall_msg])
+        # 由 config.OV_INJECT 控制（step/both 时启用）
+        if config.OV_INJECT in ('step', 'both'):
+            step_recall = openviking_load_context(messages, session_id=session_id)
+            if step_recall:
+                recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
+                messages.append(recall_msg)
+                _persist(session_id, ov_session_id, [recall_msg])
 
         # ---- 请求 1.N+1：思维链 + 工具调用 + 调用结果 → 回答或继续 ----
         events.ev_continuing(tool_rounds)
@@ -645,11 +651,13 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         }
         events.ev_warning("工具调用次数已达上限，强制基于已有结果给出最终回答", code="max_tool_rounds")
         messages.append(force_msg)
-        step_recall = openviking_load_context(messages, session_id=session_id)
-        if step_recall:
-            recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
-            messages.append(recall_msg)
-            _persist(session_id, ov_session_id, [recall_msg])
+        # 由 config.OV_INJECT 控制（step/both 时启用）
+        if config.OV_INJECT in ('step', 'both'):
+            step_recall = openviking_load_context(messages, session_id=session_id)
+            if step_recall:
+                recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
+                messages.append(recall_msg)
+                _persist(session_id, ov_session_id, [recall_msg])
         content, reasoning, tool_calls, output_items, usage = await stream_llm(client, messages, session_id=session_id)
         total_usage = _add_usage(total_usage, usage)
         web_search_calls = [oi for oi in output_items if oi.get('type') == 'web_search_call']
