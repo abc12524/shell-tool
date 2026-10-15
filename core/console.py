@@ -108,9 +108,14 @@ if _API_MODE:
 console = Console(highlight=False)
 
 
-# 终端下 Live 每秒最多重绘次数。cmd/conhost 对「上移光标 + 清行 + 重画」较慢，
-# 逐 token 重绘（可达数十次/秒）会明显闪烁；限制到 ~8 次/秒并只重绘变化内容即可。
-_LIVE_FPS = 8
+# 内容重建节流：每秒最多把累积文本重新解析成 Markdown/Text 的次数。
+# Markdown 解析较贵，逐 token 重建（可达数十次/秒）会明显吃 CPU；限制到 ~6 次/秒。
+_LIVE_FPS = 6
+
+# 屏幕重绘频率：交给 Live 自带定时器按固定节奏刷新（每 1/4 秒一次）。
+# 把「重建内容」与「刷屏」解耦——内容最多 6 次/秒重建，屏幕稳定 4 次/秒重绘，
+# cmd/conhost 下重绘更稳、更少闪烁（对齐 Rich 默认节奏）。
+_LIVE_REFRESH_PER_SECOND = 4
 
 # 内容超过终端高度时的滚动策略：
 #   "visible"  → 不裁剪，超出部分让终端自然滚屏（跨屏内容连贯，推荐）
@@ -121,15 +126,16 @@ _LIVE_OVERFLOW = "visible"
 class _LiveStream:
     """流式渲染基类：终端下节流刷新 Live，非终端下把增量原样转发给下游。
 
-    - 终端路径：关闭 Rich 自带定时刷新线程（auto_refresh=False），改由 feed 按
-      时间节流触发 refresh——既限制重绘频率（避免每个 token 全量重绘造成闪烁），
-      又保证 Markdown/Text 只在内容真正变化时重建（无增量则完全不重绘）。
+    - 终端路径：Live 开启自带定时刷新线程（refresh_per_second=_LIVE_REFRESH_PER_SECOND，
+      即 4 次/秒）负责屏幕重绘；feed 只按 _LIVE_FPS（6 次/秒）节流重建渲染对象，
+      且仅在内容真正变化时才 update。如此「重建」与「刷屏」解耦：既避免逐 token
+      全量重绘造成闪烁，又不让 Markdown 解析跑得比刷屏还快，浪费 CPU。
     - 非终端路径（被 Server API 捕获为管道时）：把增量原样交给下游渲染，
       避免服务端先渲染一遍、客户端再渲染一遍导致的格式错乱。
     """
 
     _kind = "content"   # 子类覆盖：passthrough 时的事件类型
-    _fps = _LIVE_FPS    # 每秒最多重绘次数
+    _fps = _LIVE_FPS    # 每秒最多重建/更新渲染对象的次数
 
     def __init__(self):
         self._buf = []
@@ -151,8 +157,8 @@ class _LiveStream:
         else:
             self._live = Live(
                 console=console,
-                refresh_per_second=self._fps,
-                auto_refresh=False,   # 关闭定时重绘，改为 feed 节流触发
+                refresh_per_second=_LIVE_REFRESH_PER_SECOND,  # 由 Live 定时器稳定刷屏
+                auto_refresh=True,
                 transient=False,
                 vertical_overflow=_LIVE_OVERFLOW,
             )
@@ -167,23 +173,23 @@ class _LiveStream:
         if self._passthrough:
             _output(self._kind, delta)
             return
-        # 节流：距上次重绘不足一个刷新周期则先攒着，下个 token 再决定
+        # 节流：距上次重建不足一个周期则先攒着，交下个 token 或定时器刷屏时体现
         if time.monotonic() - self._last >= 1.0 / self._fps:
             self._flush()
 
     def _flush(self):
-        """把当前累积内容重绘一次（无变化则跳过）"""
+        """重建并更新当前渲染对象（无变化则跳过，屏幕重绘交给 Live 定时器）"""
         if self._live is None or not self._dirty:
             return
         self._live.update(self._render("".join(self._buf)))
-        self._live.refresh()
         self._last = time.monotonic()
         self._dirty = False
 
     def finish(self):
         if self._live is not None:
-            self._flush()   # 补一次，保证最后一个周期的增量也显示出来
-            self._live.stop()
+            if self._dirty:
+                self._live.update(self._render("".join(self._buf)))   # 补最后一次内容
+            self._live.stop()   # stop() 内部会做最终一次 refresh
             self._live = None
         return "".join(self._buf)
 
