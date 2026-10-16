@@ -134,7 +134,7 @@ def print_remote_skills():
     for s in skills:
         mark = "已装" if s.get("installed") else "未装"
         plat = "/".join(s.get("platform") or []) or "-"
-        rows.append((s["name"], f"{mark} · [{plat}] · {s.get('description', '')}"))
+        rows.append((s["name"], f"{mark} · {plat} · {s.get('description', '')}"))
     render_table(f"🌐 远程 skill（{hub_repo()}，{len(rows)}）", rows)
     console.print("安装：python dp.py -I <名称>", style="dim")
 
