@@ -61,6 +61,23 @@ def _as_int(value, default):
         return default
 
 
+def _load_config():
+    """把本技能文件夹内的 config.json 注入环境变量（不覆盖已有 env）。
+
+    配置与脚本同目录：doubao_search/config.json（模板见 config.example.json）。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return
+    if isinstance(cfg, dict):
+        for key, value in cfg.items():
+            if value and not os.environ.get(key):
+                os.environ[key] = str(value)
+
+
 def _raise_result_error(result: dict):
     """检查 Result 内层错误码：global 端点用 ErrorCode/ErrorMsg 报错，外层 Code 为空。"""
     code = result.get("ErrorCode", result.get("error_code"))
@@ -101,6 +118,7 @@ def search(
     if stype not in _SEARCH_TYPES:
         raise ValueError(f"未知 search_type '{search_type}'，可用: {', '.join(_SEARCH_TYPES)}")
 
+    _load_config()
     key = os.environ.get(KEY_ENV, "").strip()
     if not key:
         raise _MissingKey(f"未配置环境变量 {KEY_ENV}（在 shell-tool 的 .env 里填写）")

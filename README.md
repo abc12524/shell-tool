@@ -5,7 +5,8 @@
 ## 功能特性
 
 - **系统命令执行** — 跨平台执行 Linux/macOS (bash) 与 Windows (PowerShell/CMD) 命令
-- **技能体系（skill）** — 除系统工具外，OpenViking 记忆（`ov`）、脚本/代码编辑（`script`）、百度搜索（`baidu_search`）均下沉为 `skill/` 目录脚本；按脚本头部标准结构自动注册，新增能力只需新增脚本，无需改动核心
+- **技能体系（skill）** — 除系统工具外，OpenViking 记忆（`ov`）、脚本/代码编辑（`script`）、百度搜索（`baidu_search`）均下沉为 `skill/` 目录脚本；支持两种布局（扁平 `skill/*.py` 与文件夹 `skill/<名称>/skill.py`+配置/助手模块），按脚本头部标准结构自动注册，新增能力只需新增脚本或文件夹，无需改动核心
+- **远程技能仓库（skill_hub）** — 从 GitHub 仓库（默认 `abc12524/shell-skills`）拉取根索引 `index.json` 查看可装技能（含平台/依赖），按需下载整包到本地 `skill/` 并热注册；CLI `-I` 或原生 `skill_hub` 工具均可
 - **脚本增删改查** — 数据源为本地 `file_path`（可写，改后写回原文件）或 http(s) `url`（只读），工具自动探测编码（utf-8/gb18030/big5 等）；read 支持按 `symbol`（单个/数组）/`pattern` 正则批量、按 `start_line~end_line` 取片段（带行号、可 `limit` 分页），或返回带行号的 `outline` 骨架；改/增/删采用精确字符串替换（对齐 edit 工具，唯一匹配、支持 `replace_all`）
 - **百度搜索** — 通过百度千帆引擎搜索网页 / 查询百科
 - **OpenViking 记忆** — 语义搜索历史记忆、保存用户偏好/项目信息/决策、读取与写入记忆文件、Session 管理
@@ -27,21 +28,36 @@ shell-tool/
 │   ├── main.py               # CLI 主流程：参数解析、会话管理、记忆注入
 │   └── tools/
 │       ├── system_tools.py   # 系统信息 / 命令执行（原生 tool）
-│       ├── skill_tool.py     # skill 注册表：扫描 skill/ 头部自动注册 + 分发执行
+│       ├── skill_tool.py     # skill 注册表：扫描 skill/ 自动注册（扁平 + 文件夹）+ 分发执行
+│       ├── skill_hub.py      # 远程技能仓库：查看 / 下载 / 卸载 skill
 │       ├── ov_tools.py       # OpenViking 记忆底层实现（含自动召回/捕获等生命周期逻辑）
-│       └── __init__.py       # 原生工具 schema（get_system_info/execute_system_command/skill）+ 分发器
-├── skill/                    # skill 脚本目录：按头部标准结构自动注册
-│   ├── ov.py                 # skill: ov           —— OpenViking 记忆统一入口
-│   ├── script.py             # skill: script       —— 脚本/代码增删改查
-│   ├── _script_impl.py       # script 助手实现（`_` 开头，不注册）
-│   └── baidu_search.py       # skill: baidu_search —— 百度搜索 / 百科（千帆，进程内直连）
+│       └── __init__.py       # 原生工具 schema（get_system_info/execute_system_command/skill/skill_hub）+ 分发器
+├── skill/                    # skill 目录：按头部标准结构自动注册（两种布局可混用）
+│   ├── ov.py                 # skill: ov           —— OpenViking 记忆统一入口（扁平）
+│   ├── at/                   # skill: at           —— 定时任务（文件夹式）
+│   │   └── skill.py
+│   ├── script/               # skill: script       —— 脚本/代码增删改查
+│   │   ├── skill.py
+│   │   └── _script_impl.py   # 助手实现（`_` 开头，不注册）
+│   ├── baidu_search/         # skill: baidu_search —— 百度搜索 / 百科
+│   │   ├── skill.py
+│   │   └── config.example.json
+│   └── doubao_search/        # skill: doubao_search —— 豆包搜索 API
+│       ├── skill.py
+│       └── config.example.json
 ├── server/
 │   └── api.py                # Flask HTTP API（同步 + SSE 流式）
 └── .env.example              # 环境变量模板
 
 ### 新增 skill
 
-在 `skill/` 目录新增一个 `.py` 脚本，文件头部按标准结构声明即可自动注册，无需改动核心：
+两种布局二选一（推荐文件夹式，可把脚本与配置/助手模块放一起）：
+
+**扁平**：`skill/<名称>.py`
+
+**文件夹**：`skill/<名称>/skill.py`（入口），助手模块以 `_` 开头，配置写 `config.json`（模板 `config.example.json`）。
+
+入口文件头部按标准结构声明即可自动注册，无需改动核心：
 
 ```python
 # skill: my_skill
@@ -60,7 +76,21 @@ def run(arguments: dict) -> str:
 
 `# status: disable` 的 skill 不进入 skill 工具描述与系统提示词（即不对 LLM 披露），
 但仍可按名称查看用法 / 执行，执行逻辑不变。
+
+### 从远程仓库安装 skill
+
+远程仓库（如 [abc12524/shell-skills](https://github.com/abc12524/shell-skills)）根目录放
+`index.json`（技能名 + 说明 + 平台 + 依赖索引），每个技能一个文件夹（入口 `skill.py` 与
+`config.example.json` 同目录）。shell-tool 据此查看与下载：
+
+```bash
+python dp.py -I            # 列出远程可装 skill（含平台 / 依赖 / 是否已装）
+python dp.py -I at         # 下载 at 到本地 skill/at 并热注册
 ```
+
+模型侧亦可通过原生 `skill_hub` 工具（`action=list|install|remove`, `name=<名称>`）操作。
+安装时若技能含 `config.example.json` 且本地无 `config.json`，会复制一份待填（`config.json`
+已被 `.gitignore` 排除）。**注意：下载即在进程内导入执行其代码，仅从可信来源安装。**
 
 ## 安装
 

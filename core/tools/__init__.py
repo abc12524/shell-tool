@@ -12,6 +12,7 @@ import re
 from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
 from .skill_tool import skill_tool, disclosed_skills
+from .skill_hub import skill_hub
 from .. import config
 from .. import events
 
@@ -21,6 +22,7 @@ __all__ = [
     "get_system_info",
     "execute_system_command",
     "skill_tool",
+    "skill_hub",
 ]
 
 
@@ -90,6 +92,33 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_hub",
+            "description": (
+                "从远程技能仓库（GitHub）查看 / 下载 / 卸载 skill，"
+                f"默认仓库 {config.SKILL_HUB_REPO}@{config.SKILL_HUB_BRANCH}。"
+                "action='list' 列出远程可装技能（含平台/依赖）；"
+                "action='install' 并传 name 下载安装到本地 skill/；"
+                "action='remove' 并传 name 卸载。下载即信任其代码（会在进程内执行）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "操作：list（默认，列出远程技能）/ install（安装）/ remove（卸载）"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "技能名，action=install/remove 时必填"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
 ]
 
 
@@ -104,6 +133,7 @@ TOOL_FUNCTIONS = {
     "get_system_info": lambda args: ok(get_system_info()),
     "execute_system_command": lambda args: execute_system_command(args.get('command', '')),
     "skill": lambda args: skill_tool(args.get('all', False), args.get('skill', ''), args.get('arguments')),
+    "skill_hub": lambda args: skill_hub(args.get('action', 'list'), args.get('name', '')),
 }
 
 

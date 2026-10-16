@@ -3,7 +3,8 @@
 把任意 Python 脚本改造为 shell-tool 可自动注册的 **skill**。读完后你应当能独立完成
 "任意 `.py` → 合规 skill" 的转换，无需修改核心代码。
 
-> 本文件是说明文档，不会被注册（注册器只扫描 `skill/*.py`）。
+> 本文件是说明文档，不会被注册。注册器只认两种布局：扁平 `skill/*.py` 与
+> 文件夹 `skill/*/skill.py`（见 §1）。
 
 ---
 
@@ -11,11 +12,19 @@
 
 - skill 目录：项目根的 `skill/`。
 - 核心只暴露一个原生工具 `skill`，模型通过它列表 / 查用法 / 执行。
-- 注册器（`core/tools/skill_tool.py`）在启动时扫描 `skill/*.py`：
-  - 读文件**最前面连续的 `#` 注释行**（头部），符合规范即注册；
-  - 未声明 `# skill:` 的脚本不注册（可作被 import 的助手模块）。
-- 执行时按需 `importlib` 导入 `skill.<文件名>` 并调用其 `run(arguments)`，**进程内运行**。
-- 一个脚本 = 一个 skill（`ov` / `script` / `baidu_search` 就是这样各占一项）。
+- 注册器（`core/tools/skill_tool.py`）在启动时扫描 `skill/`，支持两种布局（可混用）：
+
+  | 布局 | 位置 | 导入模块 |
+  |---|---|---|
+  | 扁平 | `skill/<名称>.py` | `skill.<名称>` |
+  | 文件夹（推荐） | `skill/<名称>/skill.py` | `skill.<名称>.skill` |
+
+  两种布局都以**入口文件**最前面连续的 `#` 注释行（头部）解析元信息，符合规范即注册；
+  未声明 `# skill:` 的脚本不注册（可作被 import 的助手模块）。
+- 执行时按需 `importlib` 导入入口模块并调用其 `run(arguments)`，**进程内运行**。
+- **文件夹式**把入口脚本、助手模块、配置文件放在同一文件夹内，更适合逻辑复杂 / 需要
+  密钥的技能；推荐新技能一律用文件夹式。
+- 一个入口 = 一个 skill（`ov` / `script` / `baidu_search` / `at` 就是这样各占一项）。
 
 ---
 
@@ -23,7 +32,7 @@
 
 ### 2.1 头部必须满足
 
-1. 位于**文件最顶部**、是**连续 `#` 注释行**；出现第一个非 `#`、非空行即头部结束。
+1. 位于**入口文件最顶部**、是**连续 `#` 注释行**；出现第一个非 `#`、非空行即头部结束。
 2. 必须包含一行声明名称（关键字大小写不敏感，名称是**单个不含空格的 token**）：
 
    ```python
@@ -31,14 +40,14 @@
    ```
 
 3. 可选 `# description:`（一句话说明），建议放在 `# skill:` 之后。
-4. 可选 `# status:`，取值 `enable`（默认）或 `disable`；见 §2.3。
+4. 可选 `# status:`，取值 `enable`（默认）或 `disable`；见 §2.5。
 5. 可选 `# usage:`，其后**每一行 `#` 注释**都作为用法文本（保留缩进，去掉行首 `#` 和一个空格）。
 
 解析器精确行为（`core/tools/skill_tool.py`）：
 
 | 项 | 规则 |
 |---|---|
-| 扫描范围 | 文件前 300 行 |
+| 扫描范围 | 入口文件前 300 行 |
 | 名称 | `^#\s*skill\s*:\s*(\S+)\s*$`（\S+ ⇒ **不能含空格**） |
 | 说明 | `^#\s*description\s*:\s*(.*)$`，仅在 `usage` 之前生效 |
 | 状态 | `^#\s*status\s*:\s*(\S+)\s*$`，仅在 `usage` 之前生效；缺省/无法识别均按 `enable` |
@@ -46,19 +55,66 @@
 | 终止 | 遇到不以 `#` 开头的行即停止解析头部 |
 | 未找到名称 | 返回 None ⇒ **不注册** |
 
-### 2.2 脚本必须满足
+### 2.2 入口文件与命名
+
+**扁平布局** `skill/<名称>.py`：
 
 1. 文件名 `*.py`，且**不以 `_` 开头**（`__init__.py` / `_helper.py` 会被跳过）。
-2. 推荐**文件名 stem == skill 名称**（注册键取头部名称，模块按文件名导入；一致可避免混淆）。
-3. 定义模块级函数：
+2. 推荐**文件名 stem == skill 名称**（注册键取头部名称，模块按文件名导入）。
 
+**文件夹布局**（推荐） `skill/<名称>/`：
+
+1. 文件夹名 == skill 名称；入口文件固定为 `skill.py`（头部声明名称，建议与文件夹名一致）。
+2. 助手模块放在同一文件夹、以 `_` 开头（如 `_impl.py`），入口用**相对导入**引用它：
    ```python
-   def run(arguments: dict) -> str | dict: ...
+   from ._impl import do_something
    ```
+   助手模块**不加** `# skill:` 头，不会被注册。
+3. 配置文件与脚本同目录（见 §2.4）；无需 `__init__.py`（`skill/` 已是有 `__init__.py`
+   的包，子文件夹按命名空间包导入）。
+4. 文件夹内以 `_` 开头的文件、`config.json` 等非 `.py` 文件都不会被当作新 skill 注册。
 
-4. 头部块之后才是普通代码（docstring、`import` 等）。
+### 2.3 必须定义入口函数
 
-### 2.3 status：是否对 LLM 披露
+无论哪种布局，入口模块都要定义模块级函数：
+
+```python
+def run(arguments: dict) -> str | dict: ...
+```
+
+头部块之后才是普通代码（docstring、`import` 等）。
+
+### 2.4 配置文件（脚本与配置放一起）
+
+需要密钥 / 参数的技能，在**同目录**放 `config.json`（键为环境变量名）：
+
+```json
+{ "BAIDU_QIANFAN_KEY": "sk-...", "WEB_K": "10" }
+```
+
+约定：
+
+- 提交时**只放 `config.example.json`**（示例值），真实 `config.json` 本地生成、
+  已被 `.gitignore` 排除。
+- 入口脚本在读取配置前调用一个小工具把 `config.json` 注入环境变量（**不覆盖已有 env**），
+  再照常用 `os.environ.get(...)`：
+
+  ```python
+  def _load_config():
+      path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+      try:
+          with open(path, encoding="utf-8") as f:
+              cfg = json.load(f)
+      except (OSError, ValueError):
+          return
+      for k, v in cfg.items():
+          if v and not os.environ.get(k):
+              os.environ[k] = str(v)
+  ```
+
+  这样 `skill/<名称>/config.json` 与 `.env` 都可用，且 `config.json` 优先补全缺失项。
+
+### 2.5 status：是否对 LLM 披露
 
 `# status: enable | disable`（缺省 = `enable`）只控制**是否把该 skill 披露给模型**：
 
@@ -67,12 +123,23 @@
 - **不影响执行逻辑**：`disable` 的 skill 仍在注册表 `REGISTRY` 中，按名称仍可
   `skill='名称'` 查看用法与执行；只是模型在工具列表 / 系统提示词里看不到它，不会被引导去调用。
 - 用途：临时下线某个能力而不删脚本，或不希望模型主动调用（如调试 / 高危工具）。
-- 快捷开关：`python dp.py -S <名称> <enable|disable>` 直接改写对应脚本头部的
+- 快捷开关：`python dp.py -S <名称> <enable|disable>` 直接改写对应入口头部的
   `# status:` 行；`python dp.py -S` 不带参数则列出全部 skill 及 status / 说明（均不进入对话）。
 
 ---
 
 ## 3. 脚本模板
+
+**文件夹式**（推荐）目录：
+
+```
+skill/my_name/
+├── skill.py             # 入口（带头部 + run）
+├── _impl.py             # 可选，助手模块（`_` 开头，不注册）
+└── config.example.json  # 可选，配置模板
+```
+
+`skill/my_name/skill.py`：
 
 ```python
 # skill: my_name
@@ -85,6 +152,7 @@
 #   arguments.query = 关键词
 #   示例: {"action": "a", "query": "hello"}
 from core.tools.envelope import ok, error
+# from ._impl import do_a        # 逻辑复杂时：把实现放同目录 _impl.py
 
 
 def run(arguments):
@@ -95,6 +163,8 @@ def run(arguments):
         return ok({"result": "..."})
     return error(f"未知 action '{action}'", code="unknown_action")
 ```
+
+**扁平式**等价于把上面 `skill.py` 直接放成 `skill/my_name.py`（无 `_impl.py` / 配置时更简单）。
 
 ---
 
@@ -124,9 +194,9 @@ def run(arguments):
    （若源文件是 CLI，参数通常来自 `sys.argv`；若是库文件，参数来自函数签名。）
 
 2. **决定复用方式（二选一）**
-   - **薄封装**：保留源文件为助手模块（**加在 `skill/` 里但不加头部**，或放在其他包内），
-     新建 `skill/<name>.py`（带头部）并 `import` 它。适合逻辑复杂、已被测试的代码。
-   - **内联**：把核心逻辑搬进 `skill/<name>.py` 的 `run()`。适合短小、一次性脚本。
+   - **薄封装**：保留源文件为助手模块（放同目录、`_` 开头，或放其他包内），
+     新建 `skill/<名称>/skill.py`（带头部）并**相对导入**它。适合逻辑复杂、已被测试的代码。
+   - **内联**：把核心逻辑搬进入口的 `run()`。适合短小、一次性脚本。
    - 二者都把"参数解析 / IO"移出，只保留可复用的函数体。
 
 3. **写头部**：`# skill:` → `# description:` →（可选）`# status:` → `# usage:`（用法要写清每个参数的取值与示例）。
@@ -143,9 +213,11 @@ def run(arguments):
    ```
    但 skill 执行**只调用 `run`**，`__main__` 段与注册无关。
 
-6. **命名与落盘**：`skill/<name>.py`，名称与文件名 stem 一致。
+6. **落盘与命名**：
+   - 文件夹式（推荐）：`skill/<名称>/skill.py`（+ 可选 `_impl.py` / `config.example.json`）；
+   - 扁平式：`skill/<名称>.py`。名称与文件夹名 / 文件名 stem 一致。
 
-7. **验证**（见第 8 节）。
+7. **验证**（见 §7）。
 
 ---
 
@@ -164,7 +236,7 @@ if mode == "raw":
 sys.exit(1)
 ```
 
-**改造后** `skill/mytool.py`：
+**改造后** `skill/mytool/skill.py`（文件夹式）：
 
 ```python
 # skill: mytool
@@ -174,7 +246,7 @@ sys.exit(1)
 #   arguments.query = 关键词
 #   示例: {"mode": "raw", "query": "hello"}
 from core.tools.envelope import ok, error
-from mytool_impl import do_raw  # 或把逻辑直接写在 run 内
+from ._impl import do_raw  # 或把逻辑直接写在 run 内
 
 
 def run(arguments):
@@ -190,30 +262,14 @@ def run(arguments):
 
 ---
 
-## 7. 禁止事项 / 常见错误
-
-| 错误 | 后果 | 修正 |
-|---|---|---|
-| 头部不在文件最顶 / 中间夹了空白的非注释行 | 不注册 | 头部必须最前且连续 `#` |
-| 名称含空格（`# skill: my tool`） | 不注册 | 用 `my_tool` |
-| 只有 `# description:` 没有 `# skill:` | 不注册 | 必须有 `# skill:` |
-| 文件名以 `_` 开头 | 被跳过 | 改名 |
-| 没有 `run` 或非模块级可调用 | 执行时报错 | 定义 `def run(arguments)` |
-| import 期发请求 / 写文件 | 首次执行时副作用、可能卡住 | 移入 `run()` |
-| `run` 里 `sys.exit` / 依赖 `print` 返回 | 结果丢失或进程受影响 | `return` 信封 |
-| 返回非 JSON 的裸文本 | 下游解析异常 | 用 `ok()`/`error()` |
-| 把助手模块也加了 `# skill:` | 多注册一个无用 skill | 助手模块不加头部 |
-| `# status:` 写在 `# usage:` 之后 | 状态不生效（默认 enable） | 状态声明放在 `usage` 之前 |
-
----
-
-## 8. 验证方法
+## 7. 验证方法
 
 列出与查看用法：
 
 ```bash
 python -c "from core.tools.skill_tool import skill_tool; print(skill_tool(all=True))"
 python -c "from core.tools.skill_tool import skill_tool; print(skill_tool(skill='my_name'))"
+python dp.py -S                     # 列出全部 skill 及 status
 ```
 
 执行（传 `skill` + `arguments`）：
@@ -224,18 +280,39 @@ python -c "from core.tools.skill_tool import skill_tool; print(skill_tool(skill=
 
 应得到 `{"status":"ok",...}` 或 `{"status":"error",...}`。Windows 下加 `PYTHONIOENCODING=utf-8` 避免中文乱码。
 
-自动注册验证：临时新建 `skill/tmp_xxx.py`（带头部），重新起进程确认出现在列表中；删除后消失。
+自动注册验证：临时新建 `skill/tmp_xxx/skill.py`（带头部），重新起进程确认出现在列表中；删除后消失。
+
+---
+
+## 8. 禁止事项 / 常见错误
+
+| 错误 | 后果 | 修正 |
+|---|---|---|
+| 头部不在入口文件最顶 / 中间夹了空白的非注释行 | 不注册 | 头部必须最前且连续 `#` |
+| 名称含空格（`# skill: my tool`） | 不注册 | 用 `my_tool` |
+| 只有 `# description:` 没有 `# skill:` | 不注册 | 必须有 `# skill:` |
+| 扁平文件名以 `_` 开头 | 被跳过 | 改名 |
+| 文件夹里没有 `skill.py` 入口 | 不注册 | 入口命名 `skill.py` |
+| 没有 `run` 或非模块级可调用 | 执行时报错 | 定义 `def run(arguments)` |
+| import 期发请求 / 写文件 | 首次执行时副作用、可能卡住 | 移入 `run()` |
+| `run` 里 `sys.exit` / 依赖 `print` 返回 | 结果丢失或进程受影响 | `return` 信封 |
+| 返回非 JSON 的裸文本 | 下游解析异常 | 用 `ok()`/`error()` |
+| 把助手模块也加了 `# skill:` | 多注册一个无用 skill | 助手模块不加头部 |
+| 助手模块跨目录用绝对导入（`import _impl`） | 导入失败 | 用相对导入 `from ._impl import ...` 或 `from skill.<名称>._impl import ...` |
+| 真实密钥写进 `config.json` 并提交 | 泄密 | 只提交 `config.example.json` |
+| `# status:` 写在 `# usage:` 之后 | 状态不生效（默认 enable） | 状态声明放在 `usage` 之前 |
 
 ---
 
 ## 9. 检查清单
 
-- [ ] 文件在 `skill/`，`*.py`，不以 `_` 开头
-- [ ] 头部在文件最顶、连续 `#`，含 `# skill: <无空格名称>`
+- [ ] 布局二选一：`skill/<名称>/skill.py`（推荐）或 `skill/<名称>.py`
+- [ ] 入口头部在文件最顶、连续 `#`，含 `# skill: <无空格名称>`
 - [ ] 有 `# description:` 与 `# usage:`（含参数取值与示例）
 - [ ] 如需隐藏，加 `# status: disable`（放在 `usage` 之前）；默认不写即披露
 - [ ] 定义了模块级 `def run(arguments)`
 - [ ] 取参用 `a.get(..., default)`；返回 `ok()`/`error()` 信封
 - [ ] 无 import 期副作用；无 `sys.exit`；结果靠 `return` 而非 `print`
-- [ ] 助手模块未加 `# skill:` 头
-- [ ] 按第 8 节验证通过
+- [ ] 助手模块以 `_` 开头、未加 `# skill:` 头、用相对导入引用
+- [ ] 配置同目录：只提交 `config.example.json`，`config.json` 不入库
+- [ ] 按第 7 节验证通过

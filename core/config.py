@@ -114,6 +114,11 @@ OV_WORKSPACE_PEER = os.environ.get('OV_WORKSPACE_PEER', 'false') in ('1', 'true'
 # 显式指定 peer（优先级最高，覆盖上面项）
 OV_PEER_ID = os.environ.get('OV_PEER_ID', '')
 
+# ===== skill 远程仓库（skill_hub 下载源）=====
+# 远程技能仓库（GitHub：owner/repo）与分支；skill_hub 据此拉取 index.json 与技能包。
+SKILL_HUB_REPO = (os.environ.get('SKILL_HUB_REPO', '') or 'abc12524/shell-skills').strip().strip('/')
+SKILL_HUB_BRANCH = (os.environ.get('SKILL_HUB_BRANCH', '') or 'main').strip() or 'main'
+
 # ===== 数据库存储 =====
 # DB_ONLINE: true=在线 MySQL；false=本地 SQLite（MySQL 连接失败也会自动降级 SQLite）
 DB_ONLINE = os.environ.get('DB_ONLINE', 'true') in ('1', 'true', 'True', 'yes')

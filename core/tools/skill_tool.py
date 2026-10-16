@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """skill 注册表：扫描 skill/ 目录，按脚本头部的标准结构自动注册为可执行 skill。
 
+支持两种布局（可混用）：
+    扁平：  skill/<名称>.py              → 模块 skill.<名称>
+    文件夹：skill/<名称>/skill.py        → 模块 skill.<名称>.skill（配置/助手模块同目录）
+
 脚本头部规范（文件最前面连续的 # 注释行）：
     # skill: <名称>
     # description: <一句话说明>
@@ -9,12 +13,13 @@
     #   <用法 / 参数 / 示例，可多行>
 头部之后的普通脚本体需定义 `run(arguments: dict) -> str`，返回统一信封
 （{"status":"ok","result":{...}} / {"status":"error",...}）。
-未声明 "# skill:" 的脚本（如共享助手模块）不会被注册。
+未声明 "# skill:" 的脚本（如共享助手模块，`_` 开头）不会被注册。
 
 status 只影响“是否对 LLM 披露”（skill 工具描述 + 系统提示词）；执行逻辑不变，
 被 disable 的 skill 仍可按名称查看用法 / 执行。
 
-启动时注册表为空，全部由 skill/ 目录下的脚本自动添加。
+启动时注册表为空，全部由 skill/ 目录下的脚本自动添加；安装/卸载 skill 后调用
+reload_registry() 可原地热刷新。
 """
 import importlib
 import json
@@ -157,39 +162,55 @@ def _meta_to_cache(meta):
             "status": meta.get("status", "enable"), "usage": meta["usage"]}
 
 
+def _iter_entries():
+    """枚举 skill 条目，产出 (key, path, module)。
+
+    - 扁平：  skill/<名称>.py       → key=<名称>.py       module=skill.<名称>
+    - 文件夹：skill/<名称>/skill.py → key=<名称>/skill.py module=skill.<名称>.skill
+    以 `_` 或 `.` 开头的文件/目录一律跳过（助手模块 / 隐藏目录）。
+    """
+    if not os.path.isdir(SKILL_DIR):
+        return
+    for fn in sorted(os.listdir(SKILL_DIR)):
+        if fn.startswith("_") or fn.startswith("."):
+            continue
+        full = os.path.join(SKILL_DIR, fn)
+        if os.path.isfile(full) and fn.endswith(".py"):
+            yield fn, full, "skill." + os.path.splitext(fn)[0]
+        elif os.path.isdir(full):
+            entry = os.path.join(full, "skill.py")
+            if os.path.isfile(entry):
+                yield fn + "/skill.py", entry, "skill." + fn + ".skill"
+
+
 def _scan():
     """扫描 skill/ 目录，返回 name -> meta。
 
-    结果按文件 (mtime, size) 指纹缓存到 data/skill_registry.json：文件未变化时
+    结果按脚本 (mtime, size) 指纹缓存到 data/skill_registry.json：文件未变化时
     直接复用缓存、不再打开脚本解析头部；新增/修改/删除都会只重解析受影响文件并
     原子写回缓存。缓存缺失/损坏时自动退化为全量扫描。
     """
     registry = {}
-    if not os.path.isdir(SKILL_DIR):
-        return registry
-
     cached = _load_cache()
     files = {}
     changed = False
 
-    for fn in sorted(os.listdir(SKILL_DIR)):
-        if not fn.endswith(".py") or fn.startswith("_"):
-            continue
-        path = os.path.join(SKILL_DIR, fn)
-        module = "skill." + os.path.splitext(fn)[0]
+    for key, path, module in _iter_entries():
         fp = _fingerprint(path)
         if fp is None:
             continue
 
-        entry = cached.get(fn)
+        entry = cached.get(key)
         if entry and entry.get("mtime") == fp["mtime"] and entry.get("size") == fp["size"]:
             # 指纹命中：复用缓存，不打开文件
             cached_meta = entry.get("meta")
             meta = _meta_from_cache(cached_meta, path, module)
-            files[fn] = {"mtime": fp["mtime"], "size": fp["size"], "meta": cached_meta}
+            files[key] = {"mtime": fp["mtime"], "size": fp["size"], "meta": cached_meta}
         else:
             meta = _parse_skill_header(path)
-            files[fn] = {"mtime": fp["mtime"], "size": fp["size"], "meta": _meta_to_cache(meta)}
+            if meta:
+                meta["module"] = module
+            files[key] = {"mtime": fp["mtime"], "size": fp["size"], "meta": _meta_to_cache(meta)}
             changed = True
 
         if meta:
@@ -203,6 +224,19 @@ def _scan():
 
 # 启动时为空注册表，全部由 skill/ 目录脚本自动添加
 REGISTRY = _scan()
+
+
+def reload_registry():
+    """重新扫描 skill/ 目录并原地刷新全局注册表。
+
+    供安装 / 卸载 skill 后热刷新：先清掉已缓存的 skill 子模块（保证改动后的脚本
+    被重新导入），再重扫注册表。返回新的 name -> meta。
+    """
+    global REGISTRY
+    for name in [m for m in list(sys.modules) if m.startswith("skill.")]:
+        del sys.modules[name]
+    REGISTRY = _scan()
+    return REGISTRY
 
 
 def list_skills():

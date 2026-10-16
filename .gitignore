@@ -9,3 +9,5 @@ __pycache__/
 venv/
 .DS_Store
 data/
+# 技能本地配置（含密钥）不入库，仅 config.example.json
+skill/**/config.json

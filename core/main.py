@@ -16,6 +16,7 @@ from . import events
 from .console import console, render_table
 from .tools import get_system_info
 from .tools.skill_tool import disclosed_skills, set_status, skills_overview
+from .tools.skill_hub import remote_skills, install as hub_install, _repo as hub_repo
 from .tools.ov_tools import (
     openviking_load_context,
     openviking_load_profile,
@@ -31,6 +32,7 @@ USAGE = """使用方法：python dp.py [选项] [问题]
   -n, --new    → 终结当前对话，并新开一个对话
   -s, --session [id] → 不带 id：列出最近 5 条会话；带 id：继续指定会话（可指定历史会话）
   -S, --skill [名称] [enable|disable] → 不带参数：列出全部 skill 及 status；带参数：开关该 skill 的 status
+  -I, --install [名称] → 不带名称：列出远程可装 skill；带名称：从远程仓库下载安装到本地 skill/
   -k, --key <key>    → 覆盖 DEEPSEEK_API_KEY，并写回 .env
   -m, --model <name> → 覆盖 DEEPSEEK_MODEL，并写回 .env
   不加参数     → 查看此帮助
@@ -39,7 +41,9 @@ USAGE = """使用方法：python dp.py [选项] [问题]
 
 def parse_args(argv):
     """解析命令行参数，返回
-    (new_flag, session_id, list_sessions, question, api_key, model, skill_status, show_skills)"""
+    (new_flag, session_id, list_sessions, question, api_key, model,
+     skill_status, show_skills, hub_action)
+    hub_action: None | ('list', None) | ('install', 名称)"""
     new_flag = False
     sid = None
     list_sessions = False
@@ -47,6 +51,7 @@ def parse_args(argv):
     model = None
     skill_status = None
     show_skills = False
+    hub_action = None
     question_parts = []
     i = 1
     while i < len(argv):
@@ -67,6 +72,14 @@ def parse_args(argv):
                 print("⚠️  -S/--skill 需要 <名称> <enable|disable>，例如：-S ov disable"
                       "（不带参数则列出全部 skill）")
                 sys.exit(1)
+        elif a in ('-I', '--install'):
+            if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
+                hub_action = ('install', argv[i + 1])
+                i += 2
+            else:
+                # 不带参数 → 列出远程可装 skill
+                hub_action = ('list', None)
+                i += 1
         elif a in ('-s', '--session'):
             if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
                 sid = argv[i + 1]
@@ -93,7 +106,7 @@ def parse_args(argv):
             question_parts.append(a)
             i += 1
     return (new_flag, sid, list_sessions, ' '.join(question_parts),
-            api_key, model, skill_status, show_skills)
+            api_key, model, skill_status, show_skills, hub_action)
 
 
 def print_skills():
@@ -105,6 +118,25 @@ def print_skills():
     rows = [(name, f"{status} · {desc}") for name, (status, desc) in sorted(overview.items())]
     render_table(f"🧰 已注册 skill（{len(rows)}）", rows)
     console.print("开关：python dp.py -S <名称> <enable|disable>", style="dim")
+
+
+def print_remote_skills():
+    """列出远程技能仓库中的可装 skill（供 -I 无参数查看）"""
+    try:
+        skills = remote_skills()
+    except RuntimeError as e:
+        print(f"⚠️  {e}")
+        sys.exit(1)
+    if not skills:
+        console.print("远程仓库暂无技能", style="dim")
+        return
+    rows = []
+    for s in skills:
+        mark = "已装" if s.get("installed") else "未装"
+        plat = "/".join(s.get("platform") or []) or "-"
+        rows.append((s["name"], f"{mark} · [{plat}] · {s.get('description', '')}"))
+    render_table(f"🌐 远程 skill（{hub_repo()}，{len(rows)}）", rows)
+    console.print("安装：python dp.py -I <名称>", style="dim")
 
 
 def resolve_session(new_flag, sid):
@@ -214,7 +246,7 @@ def main():
 
 async def _async_main():
     (new_flag, sid, list_sessions, question, api_key, model,
-     skill_status, show_skills) = parse_args(sys.argv)
+     skill_status, show_skills, hub_action) = parse_args(sys.argv)
     asked_at = datetime.now(timezone.utc)
 
     # -S/--skill 无参数：列出全部 skill 及 status 后退出
@@ -228,6 +260,22 @@ async def _async_main():
         good, message = set_status(name, value)
         print(("✅ " if good else "⚠️  ") + message)
         sys.exit(0 if good else 1)
+
+    # -I/--install：列远程 / 下载安装 skill 后退出（不建会话、不调用模型）
+    if hub_action:
+        action, name = hub_action
+        if action == 'list':
+            print_remote_skills()
+            sys.exit(0)
+        try:
+            res = hub_install(name)
+        except RuntimeError as e:
+            print(f"⚠️  安装失败：{e}")
+            sys.exit(1)
+        extra = "，已生成 config.json（请填配置）" if res.get("config_created") else ""
+        deps = "，依赖：" + ", ".join(res["requires"]) if res.get("requires") else ""
+        print(f"✅ 已安装 skill '{res['name']}'（{len(res['files'])} 个文件{extra}{deps}）")
+        sys.exit(0)
 
     # -k/-m：覆盖并写回 .env，本次进程与后续进程（含 8000 端口调用）均生效
     updates = {}

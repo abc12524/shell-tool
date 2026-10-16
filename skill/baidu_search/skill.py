@@ -28,7 +28,25 @@ _QUOTA = (
 )
 
 
+def _load_config():
+    """把本技能文件夹内的 config.json 注入环境变量（不覆盖已有 env）。
+
+    配置与脚本同目录：baidu_search/config.json（模板见 config.example.json）。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return
+    if isinstance(cfg, dict):
+        for key, value in cfg.items():
+            if value and not os.environ.get(key):
+                os.environ[key] = str(value)
+
+
 def _key():
+    _load_config()
     return os.environ.get("BAIDU_QIANFAN_KEY", "")
 
 
