@@ -19,10 +19,12 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse
+from urllib.request import urlopen
 
-import requests
-
-from core.tools.envelope import ok, error
+try:  # android-agent / kelivo-agent：技能目录部署了 _envelope.py
+    from _envelope import ok, error
+except ImportError:  # shell-tool：使用 core.tools.envelope
+    from core.tools.envelope import ok, error
 
 
 # ============================ 结构解析（供 outline） ============================
@@ -511,13 +513,16 @@ def write_file(file_path: str, text: str, encoding: str = "utf-8", newline: str 
 
 
 def fetch_url(url: str, timeout: int = 30):
-    """下载 http(s) 文本，返回 (text, encoding, err)；自动探测编码，统一 '\\n'。"""
+    """下载 http(s) 文本，返回 (text, encoding, err)；自动探测编码，统一 '\\n'。
+
+    使用标准库 urllib（无需第三方 requests）；非 2xx 由 urlopen 抛 HTTPError 归为下载失败。
+    """
     try:
-        resp = requests.get(url, timeout=timeout)
-        resp.raise_for_status()
-    except requests.RequestException as e:
+        with urlopen(url, timeout=timeout) as resp:
+            raw = resp.read()
+    except Exception as e:
         return None, None, f"下载失败 - {e}"
-    text, enc = _decode_bytes(resp.content)
+    text, enc = _decode_bytes(raw)
     return text.replace("\r\n", "\n").replace("\r", "\n"), enc, None
 
 
@@ -850,6 +855,53 @@ def _finish(file_path, encoding, newline, action, count, count_key, new_src,
     return ok(payload)
 
 
+def _create_file(file_path, new_code, dry_run=False):
+    """新建文件（file_path 必须不存在）；父目录缺失时自动创建。
+
+    返回摘要 + 新建内容的 unified diff（fromfile=/dev/null）；dry_run=True 只预览不落盘。
+    """
+    if not (file_path or "").strip():
+        return error("create 需要提供 file_path（不能只给 url）", code="missing_argument")
+    if os.path.isdir(file_path):
+        return error(f"路径是目录: {file_path}", code="io_error")
+    if os.path.exists(file_path):
+        return error(f"文件已存在: {file_path}（改用 edit/add）", code="already_exists")
+
+    text = new_code or ""
+    if text and not text.endswith("\n"):
+        text += "\n"
+    parent = os.path.dirname(os.path.abspath(file_path))
+    need_dir = bool(parent) and not os.path.isdir(parent)
+
+    diff = list(difflib.unified_diff([], text.splitlines(), fromfile="/dev/null",
+                                     tofile=os.path.basename(file_path) or file_path,
+                                     lineterm="", n=3))
+    truncated = len(diff) > DIFF_LIMIT
+    if truncated:
+        diff = diff[:DIFF_LIMIT]
+    payload = {"action": "create", "file_path": file_path,
+               "lines": len(text.splitlines()), "bytes": len(text.encode("utf-8")),
+               "dir_created": parent if need_dir else None,
+               "diff": "\n".join(diff)}
+    if truncated:
+        payload["diff_truncated"] = True
+    if dry_run:
+        payload["written"] = False
+        payload["dry_run"] = True
+        return ok(payload)
+    if need_dir:
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as e:
+            return error(f"创建目录失败 - {e}", code="io_error")
+    werr = write_file(file_path, text, "utf-8", "\n")
+    if werr:
+        return error(werr, code="io_error")
+    payload["created"] = True
+    payload["written"] = True
+    return ok(payload)
+
+
 def script_editor(action: str = None, file_path: str = None, url: str = None,
                   language: str = None, symbol=None, pattern: str = None,
                   start_line: int = None, end_line: int = None, limit: int = DEFAULT_LIMIT,
@@ -864,10 +916,11 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
     - read    : symbol（单个/数组）或 pattern（正则）批量取符号；或 start_line~end_line
                 行范围；都不给则返回结构骨架。输出带行号，超 limit 截断并给续读提示
     - outline : 返回结构骨架（含每个符号的起止行号）
+    - create  : 新建文件（file_path 必须不存在；父目录缺失时自动创建）
     - add     : 在 old_code 之后插入 new_code；old_code 省略则追加到末尾
     - edit    : 用 new_code 精确替换 old_code
     - delete  : 删除 old_code
-    写入动作（add/edit/delete）默认回显 unified diff；dry_run=true 时只回显 diff 不落盘。
+    写入动作（create/add/edit/delete）默认回显 unified diff；dry_run=true 时只回显 diff 不落盘。
     """
     act = (action or "").strip().lower()
     new_code = new_code if new_code is not None else ""
@@ -886,8 +939,12 @@ def script_editor(action: str = None, file_path: str = None, url: str = None,
     else:
         return error("需要提供 file_path 或 url", code="missing_source")
 
-    if act not in ("read", "outline", "add", "edit", "delete"):
-        return error(f"未知操作 '{action}'（应为 read/outline/add/edit/delete）", code="unknown_action")
+    if act not in ("read", "outline", "add", "edit", "delete", "create"):
+        return error(f"未知操作 '{action}'（应为 read/outline/add/edit/delete/create）",
+                     code="unknown_action")
+
+    if act == "create":
+        return _create_file(file_path, new_code, dry_run)
 
     encoding, newline = "utf-8", "\n"
     writable = False
