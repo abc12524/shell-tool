@@ -16,7 +16,7 @@ from . import events
 from .console import console, render_table
 from .tools import get_system_info
 from .tools.skill_tool import disclosed_skills, set_status, skills_overview
-from .tools.skill_hub import remote_skills, install as hub_install, _repo as hub_repo
+from .tools.skill_hub import remote_skills, install as hub_install, source_label as hub_source
 from .recall import (
     openviking_load_context,
     openviking_load_profile,
@@ -135,7 +135,7 @@ def print_remote_skills():
         mark = "已装" if s.get("installed") else "未装"
         plat = "/".join(s.get("platform") or []) or "-"
         rows.append((s["name"], f"{mark} · {plat} · {s.get('description', '')}"))
-    render_table(f"🌐 远程 skill（{hub_repo()}，{len(rows)}）", rows)
+    render_table(f"🌐 远程 skill（{hub_source()}，{len(rows)}）", rows)
     console.print("安装：python dp.py -I <名称>", style="dim")
 
 

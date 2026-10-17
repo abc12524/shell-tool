@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""skill_hub：从远程技能仓库（GitHub）查看 / 下载 / 卸载 skill。
+"""skill_hub：从远程技能仓库（GitHub / Gitea）查看 / 下载 / 卸载 skill。
 
 远程仓库结构（默认 abc12524/shell-skills@main，可用 SKILL_HUB_REPO / SKILL_HUB_BRANCH 覆盖）：
     index.json                    根索引：{"platforms":[...],"skills":[{name,description,platform,path,entry,requires,config}]}
     <skill>/skill.py              入口脚本（头部含 # skill: <name>）
     <skill>/config.example.json   配置模板（缺失则装后手动创建 config.json）
 
-安装：优先用 GitHub Contents API 只下载 `<path>/` 子树的文件（独立下载）；
+仓库类型由 SKILL_HUB_TYPE（github / gitea）指定；留空时若配置了 SKILL_HUB_BASE
+（例如 http://192.168.30.181:3000）则按 gitea 处理，否则按 github。
+
+安装：优先用仓库 Contents API 只下载 `<path>/` 子树的文件（独立下载）；
 API 失败（如限流）时回退整仓 tarball 解压同一子树；
 已有本地 config.json / *.conf 会在重装时保留，其余情况复制 config.example.json 为待填 config；随后热刷新注册表。
 
@@ -40,11 +43,34 @@ def _branch():
     return (getattr(config, "SKILL_HUB_BRANCH", "") or DEFAULT_BRANCH).strip() or DEFAULT_BRANCH
 
 
+def _base():
+    return (getattr(config, "SKILL_HUB_BASE", "") or "").strip().rstrip("/")
+
+
+def _type():
+    """仓库类型：显式配置优先，其次按是否配置 Gitea 基址推断。"""
+    t = (getattr(config, "SKILL_HUB_TYPE", "") or "").strip().lower()
+    if t in ("github", "gitea"):
+        return t
+    return "gitea" if _base() else "github"
+
+
+def source_label():
+    """仓库来源展示文案，如 'http://host/hollow/shell-skills@main (gitea)'。"""
+    if _type() == "gitea":
+        return f"{_base() or 'https://gitea.com'}/{_repo()}@{_branch()} (gitea)"
+    return f"{_repo()}@{_branch()} (github)"
+
+
 def _index_url():
+    if _type() == "gitea":
+        return f"{_base()}/{_repo()}/raw/branch/{_branch()}/index.json"
     return f"https://raw.githubusercontent.com/{_repo()}/{_branch()}/index.json"
 
 
 def _tarball_url():
+    if _type() == "gitea":
+        return f"{_base()}/{_repo()}/archive/{_branch()}.tar.gz"
     return f"https://codeload.github.com/{_repo()}/tar.gz/refs/heads/{_branch()}"
 
 
@@ -105,18 +131,28 @@ def _find_skill(index, name):
     return None
 
 
-def _github_headers():
+def _headers():
+    token = getattr(config, "SKILL_HUB_TOKEN", "") or os.environ.get("SKILL_HUB_TOKEN", "")
+    if _type() == "gitea":
+        headers = {"Accept": "application/json", "User-Agent": "shell-tool-skill-hub"}
+        token = token or os.environ.get("GITEA_TOKEN", "")
+        if token:
+            headers["Authorization"] = f"token {token}"
+        return headers
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "shell-tool-skill-hub"}
-    token = os.environ.get("GITHUB_TOKEN") or getattr(config, "SKILL_HUB_TOKEN", "")
+    token = token or os.environ.get("GITHUB_TOKEN", "")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
 def _contents_api(path):
-    """调用 GitHub Contents API，返回某目录的条目列表（文件+子目录）。"""
-    url = f"https://api.github.com/repos/{_repo()}/contents/{path}"
-    resp = requests.get(url, params={"ref": _branch()}, headers=_github_headers(), timeout=TIMEOUT)
+    """调用仓库 Contents API，返回某目录的条目列表（文件+子目录）。"""
+    if _type() == "gitea":
+        url = f"{_base()}/api/v1/repos/{_repo()}/contents/{path}"
+    else:
+        url = f"https://api.github.com/repos/{_repo()}/contents/{path}"
+    resp = requests.get(url, params={"ref": _branch()}, headers=_headers(), timeout=TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, list):
@@ -136,7 +172,7 @@ def _collect_via_api(path):
                 dl = e.get("download_url")
                 if not dl:
                     continue
-                r = requests.get(dl, headers=_github_headers(), timeout=TIMEOUT)
+                r = requests.get(dl, headers=_headers(), timeout=TIMEOUT)
                 r.raise_for_status()
                 rel = f"{rel_dir}/{e['name']}" if rel_dir else e["name"]
                 files.append((rel, r.content))
@@ -293,7 +329,7 @@ def skill_hub(action: str = "list", name: str = ""):
     try:
         if act == "list":
             skills = remote_skills()
-            return ok({"repo": _repo(), "branch": _branch(),
+            return ok({"type": _type(), "base": _base(), "repo": _repo(), "branch": _branch(),
                        "count": len(skills), "skills": skills})
         if act == "install":
             if not name.strip():

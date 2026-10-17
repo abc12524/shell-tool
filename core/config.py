@@ -117,9 +117,15 @@ OV_PEER_ID = os.environ.get('OV_PEER_ID', '')
 os.environ.setdefault('OV_PROJECT_ROOT', PROJECT_ROOT)
 
 # ===== skill 远程仓库（skill_hub 下载源）=====
-# 远程技能仓库（GitHub：owner/repo）与分支；skill_hub 据此拉取 index.json 与技能包。
+# 仓库类型：github / gitea；留空时按是否配置 SKILL_HUB_BASE 自动推断
+SKILL_HUB_TYPE = (os.environ.get('SKILL_HUB_TYPE', '') or '').strip().lower()
+# Gitea 服务基址（如 http://192.168.30.181:3000）；配置后默认按 gitea 处理
+SKILL_HUB_BASE = (os.environ.get('SKILL_HUB_BASE', '') or '').strip().rstrip('/')
+# 远程技能仓库（owner/repo）与分支；skill_hub 据此拉取 index.json 与技能包。
 SKILL_HUB_REPO = (os.environ.get('SKILL_HUB_REPO', '') or 'abc12524/shell-skills').strip().strip('/')
 SKILL_HUB_BRANCH = (os.environ.get('SKILL_HUB_BRANCH', '') or 'main').strip() or 'main'
+# 私有仓库访问令牌（GitHub / Gitea 通用；GitHub 也可用 GITHUB_TOKEN）
+SKILL_HUB_TOKEN = (os.environ.get('SKILL_HUB_TOKEN', '') or '').strip()
 
 # ===== 数据库存储 =====
 # DB_ONLINE: true=在线 MySQL；false=本地 SQLite（MySQL 连接失败也会自动降级 SQLite）

@@ -97,7 +97,7 @@ TOOLS = [
         "function": {
             "name": "skill_hub",
             "description": (
-                "从远程技能仓库（GitHub）查看 / 下载 / 卸载 skill，"
+                "从远程技能仓库（GitHub / Gitea）查看 / 下载 / 卸载 skill，"
                 f"默认仓库 {config.SKILL_HUB_REPO}@{config.SKILL_HUB_BRANCH}。"
                 "action='list' 列出远程可装技能（含平台/依赖）；"
                 "action='install' 并传 name 下载安装到本地 skill/；"

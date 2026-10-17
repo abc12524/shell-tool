@@ -6,7 +6,7 @@
 
 - **系统命令执行** — 跨平台执行 Linux/macOS (bash) 与 Windows (PowerShell/CMD) 命令
 - **技能体系（skill）** — 除系统工具外，OpenViking 记忆（`ov`）、脚本/代码编辑（`script`）、百度搜索（`baidu_search`）均下沉为 `skill/` 目录脚本；支持两种布局（扁平 `skill/*.py` 与文件夹 `skill/<名称>/skill.py`+配置/助手模块），按脚本头部标准结构自动注册，新增能力只需新增脚本或文件夹，无需改动核心
-- **远程技能仓库（skill_hub）** — 从 GitHub 仓库（默认 `abc12524/shell-skills`）拉取根索引 `index.json` 查看可装技能（含平台/依赖），按需下载整包到本地 `skill/` 并热注册；CLI `-I` 或原生 `skill_hub` 工具均可
+- **远程技能仓库（skill_hub）** — 从 GitHub / Gitea 仓库（默认 `abc12524/shell-skills`）拉取根索引 `index.json` 查看可装技能（含平台/依赖），按需下载整包到本地 `skill/` 并热注册；CLI `-I` 或原生 `skill_hub` 工具均可
 - **脚本增删改查** — 数据源为本地 `file_path`（可写，改后写回原文件）或 http(s) `url`（只读），工具自动探测编码（utf-8/gb18030/big5 等）；read 支持按 `symbol`（单个/数组）/`pattern` 正则批量、按 `start_line~end_line` 取片段（带行号、可 `limit` 分页），或返回带行号的 `outline` 骨架；改/增/删采用精确字符串替换（对齐 edit 工具，唯一匹配、支持 `replace_all`）
 - **百度搜索** — 通过百度千帆引擎搜索网页 / 查询百科
 - **OpenViking 记忆** — 语义搜索历史记忆、保存用户偏好/项目信息/决策、读取与写入记忆文件、Session 管理
@@ -94,6 +94,15 @@ python dp.py -I at         # 下载 at 到本地 skill/at 并热注册
 模型侧亦可通过原生 `skill_hub` 工具（`action=list|install|remove`, `name=<名称>`）操作。
 安装时若技能含 `config.example.json` 且本地无 `config.json`，会复制一份待填（`config.json`
 已被 `.gitignore` 排除）。**注意：下载即在进程内导入执行其代码，仅从可信来源安装。**
+
+仓库类型由 `.env` 控制：`SKILL_HUB_TYPE` 取 `github` / `gitea`，留空时若配置了 Gitea 基址
+`SKILL_HUB_BASE` 则自动按 gitea 处理。例如指向自建 Gitea：
+
+```bash
+SKILL_HUB_BASE=http://192.168.30.181:3000
+SKILL_HUB_REPO=hollow/shell-skills
+SKILL_HUB_BRANCH=main
+```
 
 ## 安装
 
