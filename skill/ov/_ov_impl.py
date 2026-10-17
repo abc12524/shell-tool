@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""OpenViking 记忆工具（skill 面）：search/find 语义搜索 / 读写 / 记住 / Session 管理
+"""OpenViking 外置记忆工具实现：search/find 语义搜索 / 读写 / 记住 / Session 管理
 
-面向模型的 ov skill 实现，与「自动召回/抓取」子系统分离（见 core/recall.py）：
-本模块只提供模型按需调用的记忆操作，不含自动注入 / 对话抓取；recall.py 自带独立的
-HTTP 请求，记忆召回走单独请求，两条链路互不依赖。
+由 shell-tool 的 core/tools/ov_tools.py 抽取并去掉对 core.config 的依赖，改为直接读
+环境变量（或同目录 config.json 注入的环境变量），使其可作为独立可下载 skill 运行。
 
-所有工具统一返回 DSH/OpenViking 规范信封：
-  成功 → {"status": "ok",  "result": {...}}
-  失败 → {"status": "error", "error": "...", "code": "..."}
-底层 OpenViking 后端自身也采用同一信封，故 read/list_dir/write/session 等
-直接透传其后端响应；remember/search/find 在透传基础上补全语义字段。
+内部统一使用 dict 信封：{"status":"ok","result":...} / {"status":"error","error":...,"code":...}
+对外由入口 skill.py 调 _emit() 转成运行时原生信封（shell-tool=JSON 字符串 / 移动端=dict）。
+底层 OpenViking 后端自身也采用同一信封，故 read/list_dir/write/session 等直接透传。
 """
 import hashlib
 import json
@@ -18,33 +15,139 @@ import re
 
 import requests
 
-from .. import config
-from .envelope import ok, error, is_error, passthrough
+
+# ============================ 信封兼容 ============================
+# 优先移动端 _envelope（返回 dict），其次 shell-tool core.tools.envelope（返回 JSON 字符串），
+# 两者都不存在时用内置实现 —— 这样本技能可完全脱离 shell-tool 独立运行。
+def _builtin_ok(result=None):
+    return json.dumps({"status": "ok", "result": {} if result is None else result},
+                      ensure_ascii=False)
 
 
-# ============= 基础请求 =============
+def _builtin_error(message, code=None, **extra):
+    payload = {"status": "error", "error": str(message)}
+    if code is not None:
+        payload["code"] = code
+    for key, value in extra.items():
+        if value is not None:
+            payload[key] = value
+    return json.dumps(payload, ensure_ascii=False)
+
+
+try:  # android-agent / kelivo-agent：技能目录部署了 _envelope.py（ok/error 返回 dict）
+    import _envelope as _native
+
+    def _native_ok(result=None):
+        return _native.ok(result if result is not None else {})
+
+    def _native_error(message, code=None, **extra):
+        return _native.error(message, code=code)  # 移动端信封不接受额外字段
+except ImportError:
+    try:  # shell-tool：core.tools.envelope（ok/error 返回 JSON 字符串）
+        from core.tools.envelope import ok as _native_ok, error as _native_error
+    except ImportError:  # 独立运行：内置 DSH/OpenViking 规范信封
+        _native_ok, _native_error = _builtin_ok, _builtin_error
+
+
+# ============================ 配置 ============================
+def _load_config():
+    """把同目录 config.json 注入环境变量（不覆盖已有 env），照常 os.environ 读取。"""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return
+    for k, v in cfg.items():
+        if v and not os.environ.get(k):
+            os.environ[k] = str(v)
+
+
+_load_config()
+
+
+def _conf_f(name, default):
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return float(default)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _conf_i(name, default):
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return int(default)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _conf_b(name, default):
+    v = os.environ.get(name)
+    if v is None:
+        return bool(default)
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+# ============================ 信封 ============================
+def _ok(result=None):
+    return {"status": "ok", "result": {} if result is None else result}
+
+
+def _error(message, code=None, **extra):
+    payload = {"status": "error", "error": str(message)}
+    if code is not None:
+        payload["code"] = code
+    for key, value in extra.items():
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
+def _is_error(value):
+    return isinstance(value, dict) and value.get("status") == "error"
+
+
+def _passthrough(result):
+    if isinstance(result, dict):
+        return result
+    return _error("OpenViking 返回了非预期的数据格式", code="bad_response")
+
+
+def _emit(env):
+    """把内部 dict 信封转成运行时信封：shell-tool/独立 → JSON 字符串，移动端 → dict。"""
+    if not isinstance(env, dict):
+        env = _ok(env)
+    if env.get("status") == "ok":
+        return _native_ok(env.get("result", {}))
+    extra = {k: v for k, v in env.items() if k not in ("status", "error", "code")}
+    return _native_error(env.get("error", ""), code=env.get("code"), **extra)
+
+
+# ============================ 基础请求 ============================
 def _ov_base():
     """延迟读取 OpenViking URL，避免模块级别求值导致 .env 未加载的问题"""
     return os.environ.get('OPENVIKING_URL', '')
 
 
 def openviking_peer_id():
-    """解析当前 actor peer：显式 OV_PEER_ID > 按工作目录派生(ws-*) > 回退 OPENVIKING_AGENT。
-
-    与官方 DSH 插件一致：默认可配置按 workspace 派生 peer，使不同项目的自动
-    捕获/召回与记忆写入彼此隔离，避免跨项目串记忆。
-    """
-    explicit = os.environ.get('OV_PEER_ID') or config.OV_PEER_ID
+    """解析当前 actor peer：显式 OV_PEER_ID > 按工作目录派生(ws-*) > 回退 OPENVIKING_AGENT。"""
+    explicit = os.environ.get('OV_PEER_ID') or ''
     if explicit:
         return explicit
-    if config.OV_WORKSPACE_PEER:
-        digest = hashlib.md5(config.PROJECT_ROOT.encode('utf-8')).hexdigest()[:12]
+    if _conf_b('OV_WORKSPACE_PEER', False):
+        root = os.environ.get('OV_PROJECT_ROOT') or os.getcwd()
+        digest = hashlib.md5(root.encode('utf-8')).hexdigest()[:12]
         return f"ws-{digest}"
     return os.environ.get('OPENVIKING_AGENT', 'default')
 
 
 def _hdr(v):
-    """HTTP 头值必须是 latin-1 可编码；非 ASCII（如中文）做 RFC2047 编码，避免 requests 按 latin-1 编码抛错。"""
+    """HTTP 头值必须是 latin-1 可编码；非 ASCII（如中文）做 RFC2047 编码。"""
     v = "" if v is None else str(v)
     try:
         v.encode("latin-1")
@@ -69,7 +172,6 @@ def _ov_headers():
     }
 
 
-# HTTP 状态码 → 语义化错误 code（与 name 解析的 not_found/ambiguous 风格统一）
 _HTTP_STATUS_CODES = {
     400: "invalid_argument",
     401: "unauthorized",
@@ -86,7 +188,6 @@ _HTTP_STATUS_CODES = {
     503: "unavailable",
     504: "gateway_timeout",
 }
-# 错误信息里可能带内网地址/URL，统一脱敏后再回传给模型
 _URL_RE = re.compile(r'https?://[^\s"\')]+', re.I)
 _IP_RE = re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b')
 
@@ -122,7 +223,7 @@ def _http_failure(exc):
     msg = f"OpenViking 请求失败 (HTTP {status})"
     if detail:
         msg += f" - {detail}"
-    return json.loads(error(msg, code=code))
+    return _error(msg, code=code)
 
 
 def _ov_get(path, params=None, timeout=15):
@@ -133,26 +234,26 @@ def _ov_get(path, params=None, timeout=15):
         r.raise_for_status()
         return r.json()
     except requests.Timeout:
-        return json.loads(error("OpenViking 请求超时", code="timeout"))
+        return _error("OpenViking 请求超时", code="timeout")
     except requests.HTTPError as e:
         return _http_failure(e)
     except Exception as e:
-        return json.loads(error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport"))
+        return _error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport")
 
 
 def _ov_post(path, payload, timeout=15):
     """OpenViking POST 请求；失败返回错误信封 dict（不抛异常）"""
     try:
         r = requests.post(f"{_ov_base()}{path}", headers=_ov_headers(),
-                           json=payload, timeout=timeout)
+                          json=payload, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except requests.Timeout:
-        return json.loads(error("OpenViking 请求超时", code="timeout"))
+        return _error("OpenViking 请求超时", code="timeout")
     except requests.HTTPError as e:
         return _http_failure(e)
     except Exception as e:
-        return json.loads(error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport"))
+        return _error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport")
 
 
 def _ov_delete(path, params=None, timeout=15):
@@ -163,48 +264,36 @@ def _ov_delete(path, params=None, timeout=15):
         r.raise_for_status()
         return r.json()
     except requests.Timeout:
-        return json.loads(error("OpenViking 请求超时", code="timeout"))
+        return _error("OpenViking 请求超时", code="timeout")
     except requests.HTTPError as e:
         return _http_failure(e)
     except Exception as e:
-        return json.loads(error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport"))
+        return _error(f"OpenViking 请求失败 - {_sanitize(e)}", code="transport")
 
 
-# ============= 搜索请求体（skill: find / search）=============
 def _find_payload(query, score_threshold=None, limit=None, target_uri=""):
     payload = {
         "query": query,
-        "score_threshold": score_threshold if score_threshold is not None else config.OV_FIND_THRESHOLD,
-        "limit": limit if limit is not None else config.OV_FIND_LIMIT,
+        "score_threshold": score_threshold if score_threshold is not None else _conf_f("OV_FIND_THRESHOLD", 0.4),
+        "limit": limit if limit is not None else _conf_i("OV_FIND_LIMIT", 3),
     }
-    # 同/跨项目隔离走 X-OpenViking-Peer 请求头（见 _ov_headers），find 请求体无需再带 peer_id
     if target_uri:
         payload["target_uri"] = target_uri
     return payload
 
 
 def _search_payload(query, score_threshold=None, limit=None):
-    """上下文感知搜索（/api/v1/search/search）的请求体构造。
-
-    与 find 完全对齐：peer 隔离只走 X-OpenViking-Peer 请求头（见 _ov_headers），
-    请求体不携带任何 peer 字段。服务端 SearchRequest 无 peer_id 字段（旧实现误塞
-    会被请求校验拒绝 → HTTP 400）；peer_scope 又要求 mode='context'，而本工具用
-    默认 list 模式，故同样不带。peer 身份仅由请求头决定。
-    """
+    """上下文感知搜索（/api/v1/search/search）的请求体构造（peer 隔离只走请求头）。"""
     return {
         "query": query,
-        "score_threshold": score_threshold if score_threshold is not None else config.OV_SEARCH_THRESHOLD,
-        "limit": limit if limit is not None else config.OV_SEARCH_LIMIT,
+        "score_threshold": score_threshold if score_threshold is not None else _conf_f("OV_SEARCH_THRESHOLD", 0.4),
+        "limit": limit if limit is not None else _conf_i("OV_SEARCH_LIMIT", 3),
     }
 
 
-# ============= 按文件名解析 URI =============
+# ============================ 按文件名解析 URI ============================
 def _memory_base(category: str = "") -> str:
-    """当前 peer 的隔离记忆目录根。
-
-    viking://user/<user>/peers/<agent>/memories/[_<category>/]
-    是否作为读写落点取决于是否启用隔离（见 _active_memory_base）。
-    """
+    """当前 peer 的隔离记忆目录根：viking://user/<user>/peers/<agent>/memories/[_<category>/]"""
     user = os.environ.get('OPENVIKING_USER', '')
     agent = os.environ.get('OPENVIKING_AGENT', 'default')
     base = f"viking://user/{user}/peers/{agent}/memories/"
@@ -220,13 +309,7 @@ def _ensure_parent_dirs(uri: str) -> None:
 
 
 def _memory_search_bases():
-    """按名检索时依次尝试的根目录。
-
-    顺序：当前 peer 记忆目录（与 openviking_remember 写入位置一致）→ 用户级记忆
-    目录（官方默认布局 viking://user/<user>/memories/）→ 公共资源库
-    viking://resources/。不同部署的记忆可能只存在于其中一个，顺序探测让“只传文件名”
-    在这些布局下都能命中；resources 放最后，避免抢在记忆目录之前命中同名资源。
-    """
+    """按名检索时依次尝试的根目录：peer 记忆 → 用户级记忆 → 公共资源库。"""
     user = os.environ.get('OPENVIKING_USER', '')
     peer_base = _memory_base()
     user_base = f"viking://user/{user}/memories/"
@@ -257,20 +340,11 @@ def _extract_glob_matches(result):
     return normalized
 
 
-def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20) -> str:
-    """按文件名/片段解析出记忆库中的完整 viking:// URI。
-
-    服务端没有“只传文件名即可读写”的接口（content/read、content/write 的 uri 均必填），
-    但提供 /api/v1/search/glob 做文件名模式匹配，这里用它完成解析。
-    - name: 文件名或片段，如 "ov删除工具" / "ov删除工具.md"
-    - base_uri: 检索根目录；留空时依次探测 peer 记忆 → 用户级记忆 → 公共资源库（见 _memory_search_bases）
-    - limit: 最多返回的候选数（1~200）
-    返回 result.base_uri 为“实际命中的根”，result.searched_bases 为本次搜索过的全部根
-    （未命中时 base_uri 回退为第一个根）。命中 0 / 多命中时交由调用方决定如何处理。
-    """
+def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20):
+    """按文件名/片段解析出记忆库中的完整 viking:// URI（dict 信封）。"""
     name = (name or "").strip()
     if not name:
-        return error("缺少文件名 name", code="bad_request")
+        return _error("缺少文件名 name", code="bad_request")
     try:
         n = int(limit)
     except (TypeError, ValueError):
@@ -288,14 +362,14 @@ def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20) -> s
                 timeout=15,
             )
         except Exception as e:
-            return error(f"解析文件名失败 - {_sanitize(e)}", code="internal")
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
+            return _error(f"解析文件名失败 - {_sanitize(e)}", code="internal")
+        if _is_error(result):
+            return result
         found = _extract_glob_matches(result)
         if found:
             matched_base, matches = base, found
             break
-    return ok({
+    return _ok({
         "name": name,
         "base_uri": matched_base,
         "searched_bases": bases,
@@ -308,42 +382,34 @@ def openviking_resolve_name(name: str, base_uri: str = "", limit: int = 20) -> s
 def _resolve_single(name: str, base_uri: str = ""):
     """把 name 解析为唯一 URI。返回 (uri, response)。
 
-    唯一命中 → (uri, None)；未命中/多命中 → ("", 已序列化信封字符串)。
+    唯一命中 → (uri, None)；未命中/多命中 → ("", 错误信封 dict)。
     """
-    result = openviking_resolve_name(name, base_uri)
-    data = json.loads(result) if isinstance(result, str) else result
-    if not isinstance(data, dict) or is_error(data):
-        resp = result if isinstance(result, str) else json.dumps(data, ensure_ascii=False)
-        return "", resp
+    data = openviking_resolve_name(name, base_uri)
+    if not isinstance(data, dict) or _is_error(data):
+        return "", data
     res = data.get("result") or {}
     matches = res.get("matches") or []
     if len(matches) == 1:
         return matches[0], None
     if not matches:
-        return "", error(f"未找到匹配文件: {name}", code="not_found",
-                         name=name, base_uri=res.get("base_uri", ""),
-                         searched_bases=res.get("searched_bases"))
-    return "", error(
+        return "", _error(f"未找到匹配文件: {name}", code="not_found",
+                          name=name, base_uri=res.get("base_uri", ""),
+                          searched_bases=res.get("searched_bases"))
+    return "", _error(
         f"文件名 '{name}' 匹配到 {len(matches)} 个文件，请改用完整 uri 或更精确的名字",
         code="ambiguous", name=name, matches=matches)
 
 
 def _active_memory_base():
-    """默认记忆根（读/写/profile 统一落点），使各入口落在同一处。
-
-    - 隔离模式（OV_PEER_ID / OV_WORKSPACE_PEER 开启）：固定用 peer 目录，维持项目隔离；
-    - 非隔离：在 peer 记忆 → 用户级记忆 中取第一个**有内容**(count>0)的根，都空则取第一个
-      存在的，都不存在则回落主 peer 根（由 _ensure_parent_dirs 逐级建目录）。
-    只用记忆目录、不含 resources，避免把新记忆误建进公共资源库。
-    """
-    if config.OV_PEER_ID or config.OV_WORKSPACE_PEER:
+    """默认记忆根（读/写统一落点），使各入口落在同一处。"""
+    if os.environ.get('OV_PEER_ID') or _conf_b('OV_WORKSPACE_PEER', False):
         return _memory_base()
     user = os.environ.get('OPENVIKING_USER', '')
     candidates = [_memory_base(), f"viking://user/{user}/memories/"]
     first_existing = None
     for base in candidates:
         stat = _ov_get("/api/v1/fs/stat", params={"uri": base}, timeout=10)
-        if is_error(stat):
+        if _is_error(stat):
             continue
         res = stat.get("result") if isinstance(stat, dict) else None
         if not isinstance(res, dict):
@@ -362,13 +428,12 @@ def _active_memory_base():
 def _resolve_for_write(name: str, mode: str, base_uri: str = ""):
     """写入场景的文件名解析：唯一命中直接用；未命中且 mode=create 时按记忆根新建。
 
-    返回 (uri, response)；response 非 None 表示解析失败/歧义，调用方应直接返回它。
+    返回 (uri, response)；response 非 None 表示解析失败/歧义（dict 信封）。
     """
     uri, resp = _resolve_single(name, base_uri)
     if resp is None:
         return uri, None
-    data = json.loads(resp) if isinstance(resp, str) else resp
-    if isinstance(data, dict) and data.get("code") == "not_found" and mode == "create":
+    if isinstance(resp, dict) and resp.get("code") == "not_found" and mode == "create":
         rel = name.strip().lstrip("/")
         if not rel:
             return "", resp
@@ -380,17 +445,9 @@ def _resolve_for_write(name: str, mode: str, base_uri: str = ""):
     return "", resp
 
 
-# ============= 记忆 =============
+# ============================ 记忆 ============================
 def _extract_memories(result):
-    """从 OpenViking 搜索响应中提取并归一化记忆列表。
-
-    兼容多种后端返回结构（不同版本/部署可能字段不同）：
-      - {"result": {"memories": [...]}} / {"result": {"resources": [...], "skills": [...]}}
-      - {"result": {"hits": [...]}} / {"result": {"data": {"memories": [...]}}}
-      - {"result": [...]}（result 直接是列表）
-      - {"memories": [...]}
-    语义检索结果分散在 memories / resources / skills 三段，需合并、去重后按相关度排序。
-    """
+    """从 OpenViking 搜索响应中提取并归一化记忆列表（合并 memories/resources/skills 三段）。"""
     if not isinstance(result, dict):
         return []
 
@@ -399,7 +456,6 @@ def _extract_memories(result):
             items = raw
         elif isinstance(raw, dict):
             items = []
-            # 优先合并 memories / resources / skills 三段，补全 context_type
             for ctype, key in (("memory", "memories"), ("resource", "resources"), ("skill", "skills")):
                 seg = raw.get(key)
                 if isinstance(seg, list):
@@ -408,7 +464,6 @@ def _extract_memories(result):
                             h = dict(h)
                             h["context_type"] = h.get("context_type") or ctype
                         items.append(h)
-            # 若无三段，退回其它常见列表字段
             if not items:
                 for key in ("hits", "items", "results", "memories"):
                     v = raw.get(key)
@@ -417,7 +472,6 @@ def _extract_memories(result):
                         break
         else:
             return []
-        # 按 uri 去重 + 按分数降序
         seen = set()
         merged = []
         for h in items:
@@ -446,33 +500,24 @@ def _extract_memories(result):
     return []
 
 
-def openviking_find(query: str, score_threshold: float = None, limit: int = None, target_uri: str = "") -> str:
-    """在 OpenViking 记忆中语义搜索（find 接口：纯向量相似度、无会话上下文、低延迟）。
-
-    阈值/条数/范围由 LLM 调用时自行判断传入：
-    - score_threshold: 0~1，默认 0.4（阈值越高要求越相关）
-    - limit: 0~10，默认 3（返回条数）
-    - target_uri: 可选，限定检索范围（如 viking://user/memories/、viking://resources/my-project/）
-    超出允许范围会自动收敛。
-    """
-    threshold = float(score_threshold) if score_threshold is not None else config.OV_FIND_THRESHOLD
+def openviking_find(query: str, score_threshold: float = None, limit: int = None, target_uri: str = ""):
+    """在 OpenViking 记忆中语义搜索（find 接口：纯向量、无会话上下文、低延迟）。"""
+    threshold = float(score_threshold) if score_threshold is not None else _conf_f("OV_FIND_THRESHOLD", 0.4)
     threshold = max(0.0, min(1.0, threshold))
-    n = int(limit) if limit is not None else config.OV_FIND_LIMIT
+    n = int(limit) if limit is not None else _conf_i("OV_FIND_LIMIT", 3)
     n = max(0, min(10, n))
     try:
         result = _ov_post("/api/v1/search/find", _find_payload(query, threshold, n, target_uri))
         if not isinstance(result, dict):
-            return error(f"搜索记忆失败 - 响应格式异常: {str(result)[:300]}", code="internal")
+            return _error(f"搜索记忆失败 - 响应格式异常: {str(result)[:300]}", code="internal")
         raw = result.get("result")
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
+        if _is_error(result):
+            return result
 
         mems = _extract_memories(result)
-        # 兜底：阈值过高会吞掉相关记忆。若按给定阈值命中过少（0 条，或阈值偏高 ≥0.3 却仅 1 条），
-        # 放宽阈值到 0 再试一次，取结果更多的一次。
         if threshold > 0 and (len(mems) == 0 or (len(mems) <= 1 and threshold >= 0.3)):
             fallback = _ov_post("/api/v1/search/find", _find_payload(query, 0.0, n, target_uri))
-            if not isinstance(fallback, dict) or is_error(fallback):
+            if not isinstance(fallback, dict) or _is_error(fallback):
                 fb = _extract_memories(fallback)
                 if len(fb) > len(mems):
                     mems = fb
@@ -488,39 +533,30 @@ def openviking_find(query: str, score_threshold: float = None, limit: int = None
         }
         if not hits:
             out["message"] = "未找到相关记忆"
-            # 诊断：后端有响应但未能解析出记忆时，回传原始结构以便排查
             out["debug_raw"] = result
-        return ok(out)
+        return _ok(out)
     except Exception as e:
-        return error(f"搜索记忆失败 - {str(e)}", code="internal")
+        return _error(f"搜索记忆失败 - {str(e)}", code="internal")
 
 
-def openviking_search(query: str, score_threshold: float = None, limit: int = None) -> str:
-    """在 OpenViking 记忆中语义搜索（search 接口：上下文感知，结合会话语境提升召回）。
-
-    阈值/条数由 LLM 调用时自行判断传入：
-    - score_threshold: 0~1，默认 0.4（阈值越高要求越相关）
-    - limit: 0~10，默认 3（返回条数）
-    超出允许范围会自动收敛。
-    """
-    threshold = float(score_threshold) if score_threshold is not None else config.OV_SEARCH_THRESHOLD
+def openviking_search(query: str, score_threshold: float = None, limit: int = None):
+    """在 OpenViking 记忆中语义搜索（search 接口：上下文感知，结合会话语境提升召回）。"""
+    threshold = float(score_threshold) if score_threshold is not None else _conf_f("OV_SEARCH_THRESHOLD", 0.4)
     threshold = max(0.0, min(1.0, threshold))
-    n = int(limit) if limit is not None else config.OV_SEARCH_LIMIT
+    n = int(limit) if limit is not None else _conf_i("OV_SEARCH_LIMIT", 3)
     n = max(0, min(10, n))
     try:
         result = _ov_post("/api/v1/search/search", _search_payload(query, threshold, n))
         if not isinstance(result, dict):
-            return error(f"搜索记忆失败 - 响应格式异常: {str(result)[:300]}", code="internal")
+            return _error(f"搜索记忆失败 - 响应格式异常: {str(result)[:300]}", code="internal")
         raw = result.get("result")
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
+        if _is_error(result):
+            return result
 
         mems = _extract_memories(result)
-        # 兜底：阈值过高会吞掉相关记忆。若按给定阈值命中过少（0 条，或阈值偏高 ≥0.3 却仅 1 条），
-        # 放宽阈值到 0 再试一次，取结果更多的一次。
         if threshold > 0 and (len(mems) == 0 or (len(mems) <= 1 and threshold >= 0.3)):
             fallback = _ov_post("/api/v1/search/search", _search_payload(query, 0.0, n))
-            if not isinstance(fallback, dict) or is_error(fallback):
+            if not isinstance(fallback, dict) or _is_error(fallback):
                 fb = _extract_memories(fallback)
                 if len(fb) > len(mems):
                     mems = fb
@@ -535,33 +571,30 @@ def openviking_search(query: str, score_threshold: float = None, limit: int = No
         }
         if not hits:
             out["message"] = "未找到相关记忆"
-            # 诊断：后端有响应但未能解析出记忆时，回传原始结构以便排查
             out["debug_raw"] = result
-        return ok(out)
+        return _ok(out)
     except Exception as e:
-        return error(f"搜索记忆失败 - {str(e)}", code="internal")
+        return _error(f"搜索记忆失败 - {str(e)}", code="internal")
 
 
-def openviking_remember(category: str, name: str, content: str) -> str:
+def openviking_remember(category: str, name: str, content: str):
     """将信息保存到 OpenViking 记忆"""
     if category not in ("preferences", "entities", "events", "experiences"):
-        return error(
+        return _error(
             f"未知分类: {category}，可选: preferences/entities/events/experiences",
             code="bad_category",
         )
     uri = _active_memory_base() + f"{category}/{name}.md"
 
     try:
-        # 递归创建父目录（逐级 mkdir，忽略已存在的错误）
         _ensure_parent_dirs(uri)
 
-        # 写入内容：先试 replace（文件已存在），失败再试 create（新建）
         write_result = _ov_post(
             "/api/v1/content/write",
             {"uri": uri, "content": content, "mode": "replace", "wait": True},
             timeout=30,
         )
-        if is_error(write_result):
+        if _is_error(write_result):
             err_text = str(write_result.get("error", ""))
             if write_result.get("code") == "not_found" or "NOT_FOUND" in err_text or "not found" in err_text.lower():
                 write_result = _ov_post(
@@ -569,30 +602,22 @@ def openviking_remember(category: str, name: str, content: str) -> str:
                     {"uri": uri, "content": content, "mode": "create", "wait": True},
                     timeout=30,
                 )
-        if is_error(write_result):
-            return json.dumps(write_result, ensure_ascii=False)
+        if _is_error(write_result):
+            return write_result
 
-        # 透传 OpenViking 规范信封，并补全我们已知的分类/名称
         if isinstance(write_result, dict):
             res = write_result.get("result")
             if isinstance(res, dict):
                 res.setdefault("category", category)
                 res.setdefault("name", name)
-            return json.dumps(write_result, ensure_ascii=False)
-        return ok({"uri": uri, "category": category, "name": name})
+            return write_result
+        return _ok({"uri": uri, "category": category, "name": name})
     except Exception as e:
-        return error(f"保存记忆失败 - {str(e)}", code="internal")
+        return _error(f"保存记忆失败 - {str(e)}", code="internal")
 
 
-def openviking_read(uri: str, name: str = "", base_uri: str = "") -> str:
-    """读取 OpenViking 文件内容
-
-    支持三种调用方式：
-    - 单个 URI 字符串 → 直接返回文件内容
-    - URI 列表（数组）   → 逐个读取并聚合返回（多文件读取）
-    - 仅给文件名 name    → 先按名解析出唯一 URI（见 openviking_resolve_name）再读取；
-                         可用 base_uri 指定解析根目录（默认探测 peer / 用户级记忆目录）
-    """
+def openviking_read(uri, name: str = "", base_uri: str = ""):
+    """读取 OpenViking 文件内容（支持单 uri / uri 列表 / 仅给 name 解析）。"""
     if isinstance(uri, list):
         return _aggregate_read(uri)
     if not uri and name:
@@ -601,23 +626,22 @@ def openviking_read(uri: str, name: str = "", base_uri: str = "") -> str:
             return resp
     try:
         result = _ov_get("/api/v1/content/read", params={"uri": uri})
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        # OpenViking 读返回 {"status":"ok","result":"<内容>"}，原样透传
-        return json.dumps(result, ensure_ascii=False)
+        if _is_error(result):
+            return result
+        return result
     except Exception as e:
-        return error(f"读取失败 - {str(e)}", code="internal")
+        return _error(f"读取失败 - {str(e)}", code="internal")
 
 
-def _aggregate_read(uris: list) -> str:
+def _aggregate_read(uris: list):
     """批量读取多个 OpenViking 文件：逐个调用单文件接口聚合返回"""
     if not uris:
-        return error("uris 列表为空", code="bad_request")
+        return _error("uris 列表为空", code="bad_request")
     results = []
     for uri in uris:
         try:
             r = _ov_get("/api/v1/content/read", params={"uri": uri})
-            if is_error(r):
+            if _is_error(r):
                 results.append({"uri": uri, "success": False, "error": r.get("error", "未知错误")})
             elif isinstance(r, dict) and "result" in r:
                 results.append({"uri": uri, "success": True, "content": r.get("result", "")})
@@ -625,32 +649,25 @@ def _aggregate_read(uris: list) -> str:
                 results.append({"uri": uri, "success": False, "error": "未知响应结构"})
         except Exception as e:
             results.append({"uri": uri, "success": False, "error": f"读取失败 - {str(e)}"})
-    return ok({"count": len(results), "results": results})
+    return _ok({"count": len(results), "results": results})
 
 
-def openviking_list_dir(uri: str, recursive: bool = False) -> str:
+def openviking_list_dir(uri: str, recursive: bool = False):
     """列出 OpenViking 目录内容"""
     try:
         params = {"uri": uri}
         if recursive:
             params["recursive"] = "true"
         result = _ov_get("/api/v1/fs/tree", params=params)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"列出目录失败 - {str(e)}", code="internal")
+        return _error(f"列出目录失败 - {str(e)}", code="internal")
 
 
-def openviking_write_file(uri: str, content: str, mode: str = "replace", name: str = "", base_uri: str = "") -> str:
-    """写入内容到 OpenViking 文件（create/replace/append）
-
-    仅给文件名 name（不给 uri）时，先按名解析：
-    - 唯一命中 → 写该文件；
-    - mode=create 且未命中 → 在 base_uri（默认记忆根目录）下按 name 新建（自动补 .md、建父目录）；
-    - 其余未命中/多命中 → 返回 not_found / ambiguous 信封，不落盘。
-    base_uri 可指定解析（及新建）的根目录，默认探测 peer / 用户级记忆目录。
-    """
+def openviking_write_file(uri: str, content: str, mode: str = "replace", name: str = "", base_uri: str = ""):
+    """写入内容到 OpenViking 文件（create/replace/append）。"""
     if not uri and name:
         uri, resp = _resolve_for_write(name, mode, base_uri)
         if resp is not None:
@@ -660,117 +677,111 @@ def openviking_write_file(uri: str, content: str, mode: str = "replace", name: s
         if mode == "create":
             payload["wait"] = False
         result = _ov_post("/api/v1/content/write", payload, timeout=30)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"写入失败 - {str(e)}", code="internal")
+        return _error(f"写入失败 - {str(e)}", code="internal")
 
 
-def openviking_forget(uri: str, recursive: bool = False, name: str = "", base_uri: str = "") -> str:
-    """从 OpenViking 删除（遗忘）文件或目录。
-
-    对齐 MCP forget：recursive=True 时递归删除目录及其所有子项。
-    仅给文件名 name（不给 uri）时先按名解析，且要求唯一命中（删除不接受歧义）；
-    base_uri 可指定解析根目录（默认探测 peer / 用户级记忆目录）。
-    注意：此操作不可撤销。
-    """
+def openviking_forget(uri: str, recursive: bool = False, name: str = "", base_uri: str = ""):
+    """从 OpenViking 删除（遗忘）文件或目录（不可撤销）。"""
     if not uri and name:
         uri, resp = _resolve_single(name, base_uri)
         if resp is not None:
             return resp
     if not uri or not uri.strip():
-        return error("缺少 uri 参数，请提供要删除的文件/目录 URI", code="bad_request")
+        return _error("缺少 uri 参数，请提供要删除的文件/目录 URI", code="bad_request")
     try:
         params = {"uri": uri}
         if recursive:
             params["recursive"] = "true"
         result = _ov_delete("/api/v1/fs", params=params)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"删除失败 - {str(e)}", code="internal")
+        return _error(f"删除失败 - {str(e)}", code="internal")
 
 
-# ============= Session 管理 =============
-def openviking_create_session(session_id: str = "") -> str:
+# ============================ Session 管理 ============================
+def openviking_create_session(session_id: str = ""):
     """创建 OpenViking Session"""
     payload = {}
     if session_id:
         payload["session_id"] = session_id
     try:
         result = _ov_post("/api/v1/sessions", payload, timeout=15)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"创建 session 失败 - {str(e)}", code="internal")
+        return _error(f"创建 session 失败 - {str(e)}", code="internal")
 
 
-def openviking_add_message(session_id: str, role: str, content: str, peer_id: str = "") -> str:
+def openviking_add_message(session_id: str, role: str, content: str, peer_id: str = ""):
     """向 OpenViking Session 添加单条消息"""
     if not session_id:
-        return error("缺少 session_id 参数，请先创建 session 再添加消息", code="bad_request")
+        return _error("缺少 session_id 参数，请先创建 session 再添加消息", code="bad_request")
     payload = {"role": role, "content": content}
     if peer_id:
         payload["peer_id"] = peer_id
     try:
         result = _ov_post(f"/api/v1/sessions/{session_id}/messages", payload, timeout=15)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"添加消息失败 - {str(e)}", code="internal")
+        return _error(f"添加消息失败 - {str(e)}", code="internal")
 
 
-def openviking_add_messages_batch(session_id: str, messages: list) -> str:
+def openviking_add_messages_batch(session_id: str, messages: list):
     """批量向 OpenViking Session 添加消息（最多 100 条）"""
     if not session_id:
-        return error("缺少 session_id 参数，请先创建 session 再批量添加消息", code="bad_request")
+        return _error("缺少 session_id 参数，请先创建 session 再批量添加消息", code="bad_request")
     if not messages:
-        return error("messages 列表为空，请提供要添加的消息", code="bad_request")
+        return _error("messages 列表为空，请提供要添加的消息", code="bad_request")
     try:
         result = _ov_post(f"/api/v1/sessions/{session_id}/messages/batch", {"messages": messages}, timeout=15)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"批量添加消息失败 - {str(e)}", code="internal")
+        return _error(f"批量添加消息失败 - {str(e)}", code="internal")
 
 
-def openviking_commit_session(session_id: str, keep_recent_count: int = 0) -> str:
+def openviking_commit_session(session_id: str, keep_recent_count: int = 0):
     """提交/归档 OpenViking Session，触发记忆提取"""
     if not session_id:
-        return error("缺少 session_id 参数，请先创建 session 再提交", code="bad_request")
+        return _error("缺少 session_id 参数，请先创建 session 再提交", code="bad_request")
     try:
         result = _ov_post(f"/api/v1/sessions/{session_id}/commit", {"keep_recent_count": keep_recent_count}, timeout=30)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"提交 session 失败 - {str(e)}", code="internal")
+        return _error(f"提交 session 失败 - {str(e)}", code="internal")
 
 
-def openviking_get_session(session_id: str) -> str:
+def openviking_get_session(session_id: str):
     """获取 OpenViking Session 详情"""
     if not session_id:
-        return error("缺少 session_id 参数，请先创建 session 再查询", code="bad_request")
+        return _error("缺少 session_id 参数，请先创建 session 再查询", code="bad_request")
     try:
         result = _ov_get(f"/api/v1/sessions/{session_id}", timeout=15)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"获取 session 失败 - {str(e)}", code="internal")
+        return _error(f"获取 session 失败 - {str(e)}", code="internal")
 
 
-def openviking_list_sessions() -> str:
+def openviking_list_sessions():
     """列出 OpenViking 所有 Session"""
     try:
         result = _ov_get("/api/v1/sessions", timeout=15)
-        if is_error(result):
-            return json.dumps(result, ensure_ascii=False)
-        return passthrough(result)
+        if _is_error(result):
+            return result
+        return _passthrough(result)
     except Exception as e:
-        return error(f"列出 session 失败 - {str(e)}", code="internal")
+        return _error(f"列出 session 失败 - {str(e)}", code="internal")

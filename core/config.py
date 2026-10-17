@@ -113,6 +113,8 @@ OV_PROFILE_TOKEN_BUDGET = int(os.environ.get('OV_PROFILE_TOKEN_BUDGET', '1000'))
 OV_WORKSPACE_PEER = os.environ.get('OV_WORKSPACE_PEER', 'false') in ('1', 'true', 'True', 'yes')
 # 显式指定 peer（优先级最高，覆盖上面项）
 OV_PEER_ID = os.environ.get('OV_PEER_ID', '')
+# 供 skill/ov/（独立进程内技能）与本模块派生一致的 ws-* peer：统一项目根
+os.environ.setdefault('OV_PROJECT_ROOT', PROJECT_ROOT)
 
 # ===== skill 远程仓库（skill_hub 下载源）=====
 # 远程技能仓库（GitHub：owner/repo）与分支；skill_hub 据此拉取 index.json 与技能包。

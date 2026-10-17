@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """OpenViking 记忆召回 / 抓取（与 ov skill 分离的独立子系统）
 
-本模块只负责「自动」记忆能力，与面向模型的 ov skill（core/tools/ov_tools.py）解耦：
+本模块只负责「自动」记忆能力，与面向模型的 ov skill（skill/ov/，自包含）解耦：
 
 - 召回：openviking_load_context（question / step 注入）、openviking_load_profile
 - 抓取：openviking_capture / openviking_ensure_session / openviking_commit_session
 
-并自带独立的 HTTP 请求实现（_ov_post / _ov_get / _ov_delete），**不复用** ov_tools
-的传输层 —— 记忆搜索走单独的请求，召回链路与 skill 链路互不影响。
+并自带独立的 HTTP 请求实现（_ov_post / _ov_get / _ov_delete），**不复用** skill 侧的
+传输层 —— 记忆搜索走单独的请求，召回链路与 skill 链路互不影响。
 
 开关见 .env（core/config.py）：OV_INJECT / OV_PROFILE / OV_CAPTURE /
 OV_RECALL_DEDUP_TURNS / OV_FIND_THRESHOLD / OV_FIND_LIMIT / OV_MIN_QUERY_LENGTH 等。

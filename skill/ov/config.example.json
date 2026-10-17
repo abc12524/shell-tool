@@ -1,0 +1,10 @@
+{
+  "OPENVIKING_URL": "http://127.0.0.1:1933",
+  "OPENVIKING_KEY": "your-openviking-key",
+  "OPENVIKING_USER": "your-user",
+  "OPENVIKING_AGENT": "default",
+  "OV_SEARCH_THRESHOLD": "0.4",
+  "OV_SEARCH_LIMIT": "3",
+  "OV_FIND_THRESHOLD": "0.4",
+  "OV_FIND_LIMIT": "3"
+}

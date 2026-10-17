@@ -26,14 +26,17 @@ shell-tool/
 │   ├── db.py                 # 存储层：本地 SQLite 唯一读写源 + 在线 MySQL 幂等同步
 │   ├── llm.py                # API 调用层：流式请求 + 工具调用循环（Responses / Chat Completions 双协议）
 │   ├── main.py               # CLI 主流程：参数解析、会话管理、记忆注入
+│   ├── recall.py             # 记忆召回/抓取（自动注入 + OV 会话上传，独立于 skill）
 │   └── tools/
 │       ├── system_tools.py   # 系统信息 / 命令执行（原生 tool）
 │       ├── skill_tool.py     # skill 注册表：扫描 skill/ 自动注册（扁平 + 文件夹）+ 分发执行
 │       ├── skill_hub.py      # 远程技能仓库：查看 / 下载 / 卸载 skill
-│       ├── ov_tools.py       # OpenViking 记忆底层实现（含自动召回/捕获等生命周期逻辑）
 │       └── __init__.py       # 原生工具 schema（get_system_info/execute_system_command/skill/skill_hub）+ 分发器
 ├── skill/                    # skill 目录：按头部标准结构自动注册（两种布局可混用）
-│   ├── ov.py                 # skill: ov           —— OpenViking 记忆统一入口（扁平）
+│   ├── ov/                   # skill: ov           —— OpenViking 记忆统一入口（文件夹式，自包含）
+│   │   ├── skill.py
+│   │   ├── _ov_impl.py       # 助手实现（`_` 开头，不注册）
+│   │   └── config.example.json
 │   ├── at/                   # skill: at           —— 定时任务（文件夹式）
 │   │   └── skill.py
 │   ├── script/               # skill: script       —— 脚本/代码增删改查
