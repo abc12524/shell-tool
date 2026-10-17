@@ -6,9 +6,9 @@
     <skill>/skill.py              入口脚本（头部含 # skill: <name>）
     <skill>/config.example.json   配置模板（缺失则装后手动创建 config.json）
 
-安装：下载整仓 tarball（1 次请求），仅解压 `<path>/` 子树到本地 `skill/<name>/`；
-已有本地 config.json / *.conf 会在重装时保留，其余情况复制 config.example.json 为待填 config；
-随后热刷新注册表。
+安装：优先用 GitHub Contents API 只下载 `<path>/` 子树的文件（独立下载）；
+API 失败（如限流）时回退整仓 tarball 解压同一子树；
+已有本地 config.json / *.conf 会在重装时保留，其余情况复制 config.example.json 为待填 config；随后热刷新注册表。
 
 安全：下载即等价于信任该仓库的代码（会在本进程内 import 执行）。仅从可信来源安装。
 """
@@ -105,6 +105,77 @@ def _find_skill(index, name):
     return None
 
 
+def _github_headers():
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "shell-tool-skill-hub"}
+    token = os.environ.get("GITHUB_TOKEN") or getattr(config, "SKILL_HUB_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _contents_api(path):
+    """调用 GitHub Contents API，返回某目录的条目列表（文件+子目录）。"""
+    url = f"https://api.github.com/repos/{_repo()}/contents/{path}"
+    resp = requests.get(url, params={"ref": _branch()}, headers=_github_headers(), timeout=TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list):
+        raise RuntimeError(f"'{path}' 不是目录")
+    return data
+
+
+def _collect_via_api(path):
+    """仅下载 <path>/ 子树：逐目录列举 + 逐文件下载。返回 [(rel, bytes)]。"""
+    files = []
+
+    def walk(rel_dir):
+        for e in _contents_api(f"{path}/{rel_dir}" if rel_dir else path):
+            if e.get("type") == "dir":
+                walk(f"{rel_dir}/{e['name']}" if rel_dir else e["name"])
+            elif e.get("type") == "file":
+                dl = e.get("download_url")
+                if not dl:
+                    continue
+                r = requests.get(dl, headers=_github_headers(), timeout=TIMEOUT)
+                r.raise_for_status()
+                rel = f"{rel_dir}/{e['name']}" if rel_dir else e["name"]
+                files.append((rel, r.content))
+
+    walk("")
+    return files
+
+
+def _collect_via_tarball(path):
+    """回退方案：下载整仓 tarball 后只取 <path>/ 子树。返回 [(rel, bytes)]。"""
+    try:
+        resp = requests.get(_tarball_url(), timeout=TIMEOUT)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"下载技能包失败 - {e}")
+    try:
+        tar = tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz")
+    except tarfile.TarError as e:
+        raise RuntimeError(f"技能包不是合法压缩包 - {e}")
+
+    files = []
+    try:
+        members = tar.getmembers()
+        if not members:
+            raise RuntimeError("技能包为空")
+        prefix = members[0].name.split("/", 1)[0] + "/" + path + "/"
+        for m in members:
+            if not m.isfile() or not m.name.startswith(prefix):
+                continue
+            rel = m.name[len(prefix):]
+            src = tar.extractfile(m)
+            if src is None:
+                continue
+            files.append((rel, src.read()))
+    finally:
+        tar.close()
+    return files
+
+
 def install(name):
     """下载并安装指定 skill，返回结果 dict；失败抛 RuntimeError。"""
     name = (name or "").strip()
@@ -119,52 +190,37 @@ def install(name):
     if not path:
         raise RuntimeError(f"skill '{name}' 的 path 非法")
 
-    try:
-        resp = requests.get(_tarball_url(), timeout=TIMEOUT)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"下载技能包失败 - {e}")
-
-    try:
-        tar = tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz")
-    except tarfile.TarError as e:
-        raise RuntimeError(f"技能包不是合法压缩包 - {e}")
-
-    members = tar.getmembers()
-    if not members:
-        raise RuntimeError("技能包为空")
-    root = members[0].name.split("/", 1)[0] + "/"
-    prefix = root + path + "/"
-
     dest_dir = os.path.join(SKILL_DIR, name)
     tmp_dir = dest_dir + ".tmp"
     if os.path.exists(tmp_dir):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    written, total = [], 0
+    # 优先独立下载（仅目标技能的文件）；失败回退整仓 tarball
+    source = "api"
     try:
-        for m in members:
-            if not m.isfile() or not m.name.startswith(prefix):
-                continue
-            rel = _safe_relpath(m.name[len(prefix):])
-            if not rel:
-                continue
-            src = tar.extractfile(m)
-            if src is None:
-                continue
-            data = src.read()
-            target = os.path.join(tmp_dir, *rel.split("/"))
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, "wb") as f:
-                f.write(data)
-            written.append(rel)
-            total += len(data)
-    finally:
-        tar.close()
+        files = _collect_via_api(path)
+    except (requests.RequestException, RuntimeError) as e:
+        source = "tarball"
+        try:
+            files = _collect_via_tarball(path)
+        except RuntimeError:
+            raise RuntimeError(f"下载技能 '{name}' 失败 - {e}")
+
+    written, total = [], 0
+    for rel, data in files:
+        rel = _safe_relpath(rel)
+        if not rel:
+            continue
+        target = os.path.join(tmp_dir, *rel.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(data)
+        written.append(rel)
+        total += len(data)
 
     if not written:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise RuntimeError(f"技能包中未找到 '{path}/' 目录内容")
+        raise RuntimeError(f"未找到 '{path}/' 目录内容")
 
     # 保留本地配置文件（config.json / *.conf），重装不丢配置
     preserved = {}
@@ -204,6 +260,7 @@ def install(name):
     return {
         "name": name,
         "path": dest_dir,
+        "source": source,
         "files": written,
         "bytes": total,
         "config_created": config_created,
