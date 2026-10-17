@@ -7,7 +7,8 @@
     <skill>/config.example.json   配置模板（缺失则装后手动创建 config.json）
 
 安装：下载整仓 tarball（1 次请求），仅解压 `<path>/` 子树到本地 `skill/<name>/`；
-若含 config.example.json 且本地无 config.json，则复制一份待填；随后热刷新注册表。
+已有本地 config.json / *.conf 会在重装时保留，其余情况复制 config.example.json 为待填 config；
+随后热刷新注册表。
 
 安全：下载即等价于信任该仓库的代码（会在本进程内 import 执行）。仅从可信来源安装。
 """
@@ -165,12 +166,33 @@ def install(name):
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError(f"技能包中未找到 '{path}/' 目录内容")
 
+    # 保留本地配置文件（config.json / *.conf），重装不丢配置
+    preserved = {}
+    if os.path.isdir(dest_dir):
+        for base, _dirs, files in os.walk(dest_dir):
+            for fn in files:
+                if fn == "config.json" or fn.endswith(".conf"):
+                    full = os.path.join(base, fn)
+                    rel = os.path.relpath(full, dest_dir).replace("\\", "/")
+                    if rel not in written:
+                        try:
+                            with open(full, "rb") as f:
+                                preserved[rel] = f.read()
+                        except OSError:
+                            pass
+
     # 原子替换目标目录
     if os.path.exists(dest_dir):
         shutil.rmtree(dest_dir, ignore_errors=True)
     os.replace(tmp_dir, dest_dir)
 
-    # 用配置模板生成待填的 config.json
+    # 还原保留的本地配置，否则用配置模板生成待填的 config.json
+    for rel, data in preserved.items():
+        target = os.path.join(dest_dir, *rel.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(data)
+
     config_created = False
     example = os.path.join(dest_dir, "config.example.json")
     real = os.path.join(dest_dir, "config.json")
@@ -185,6 +207,7 @@ def install(name):
         "files": written,
         "bytes": total,
         "config_created": config_created,
+        "config_preserved": sorted(preserved),
         "requires": entry.get("requires", []),
     }
 
