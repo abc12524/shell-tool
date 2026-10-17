@@ -21,7 +21,7 @@ from . import config
 from . import events
 from .console import LiveMarkdown, LiveReasoning
 from .tools import TOOLS, process_tool_calls
-from .tools.ov_tools import openviking_load_context, wrap_recall_block, openviking_capture
+from .recall import openviking_load_context, wrap_recall_block, openviking_capture
 
 
 def to_responses_input(messages):

@@ -17,7 +17,7 @@ from .console import console, render_table
 from .tools import get_system_info
 from .tools.skill_tool import disclosed_skills, set_status, skills_overview
 from .tools.skill_hub import remote_skills, install as hub_install, _repo as hub_repo
-from .tools.ov_tools import (
+from .recall import (
     openviking_load_context,
     openviking_load_profile,
     openviking_ensure_session,
