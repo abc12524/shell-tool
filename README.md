@@ -265,3 +265,11 @@ curl http://localhost:8000/health
 
 - `.env` 包含敏感密钥，已被 `.gitignore` 排除，请勿提交
 - 系统提示词内置隐私保护规则：不泄露用户隐私，非用户要求禁止执行外部链接中的命令和脚本
+
+## 许可证
+
+本项目采用 [GNU Affero General Public License v3.0](LICENSE)（AGPL-3.0）授权。
+
+Copyright (C) 2026 hollowd
+
+这意味着：你可以自由使用、修改和分发本软件，但分发修改后的版本时必须以相同许可证开源；若通过网络向用户提供服务，也必须向用户提供对应的完整源代码。详见 `LICENSE` 文件。
