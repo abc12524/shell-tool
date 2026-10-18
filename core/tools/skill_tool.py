@@ -355,13 +355,15 @@ def execute(name, arguments):
     return ok(result)
 
 
-_HELP = (
-    "skill 合集（由 skill/ 目录脚本自动注册）：\n"
-    "  - 列出全部 skill：传 all=true\n"
-    "  - 查看某个 skill 用法：传 skill='名称'（不传 arguments）\n"
-    "  - 执行某个 skill：传 skill='名称' 并传 arguments={参数}\n"
-    "已注册 skill：" + (", ".join(sorted(REGISTRY)) or "(空)")
-)
+def _help():
+    """skill 工具用法提示（仅列对 LLM 披露的 skill）。"""
+    return (
+        "skill 合集（由 skill/ 目录脚本自动注册）：\n"
+        "  - 列出全部 skill：传 all=true\n"
+        "  - 查看某个 skill 用法：传 skill='名称'（不传 arguments）\n"
+        "  - 执行某个 skill：传 skill='名称' 并传 arguments={参数}\n"
+        "已注册 skill：" + (", ".join(sorted(disclosed_skills())) or "(空)")
+    )
 
 
 def skill_tool(all: bool = False, skill: str = "", arguments: dict = None):
@@ -373,9 +375,10 @@ def skill_tool(all: bool = False, skill: str = "", arguments: dict = None):
     - 均未传                         → 返回本工具用法提示
     """
     if all:
-        return ok({"count": len(REGISTRY), "skills": list_skills()})
+        skills = disclosed_skills()
+        return ok({"count": len(skills), "skills": skills})
     if skill:
         if arguments is not None:
             return execute(skill, arguments)
         return get_usage(skill)
-    return _HELP
+    return _help()
