@@ -126,6 +126,18 @@ def run(arguments: dict) -> str | dict: ...
 - 快捷开关：`python dp.py -S <名称> <enable|disable>` 直接改写对应入口头部的
   `# status:` 行；`python dp.py -S` 不带参数则列出全部 skill 及 status / 说明（均不进入对话）。
 
+### 2.6 参数规范（action 等约束）
+
+- **操作选择器统一用 `action`**：需要区分多个操作的技能，一律用 `arguments.action`，
+  取值为简短小写英文（如 `list` / `read` / `upload`）。**禁止**再用 `cmd` / `mode` / `api`
+  等别名（历史技能已统一改为 `action`），便于模型一致地调用。
+- 单一功能技能可省略 `action`，直接传业务参数。
+- 未识别的 action 要显式报错：`return error(f"未知 action '{action}'", code="unknown_action")`。
+- **参数键一律小写 `snake_case`**（如 `file_path` / `max_len`），不用 CamelCase / kebab-case。
+- **布尔用 JSON `true` / `false`**；容错解析可用 `_as_bool`（兼容 `"1"` / `"true"` 等字符串）。
+- **多值用数组**（如 `paths` / `keys` / `args`），不要用逗号拼接字符串。
+- 每个参数设合理默认值，取参统一 `a.get("key", default)`，避免 `KeyError`。
+
 ---
 
 ## 3. 脚本模板
@@ -174,7 +186,16 @@ def run(arguments):
 - 出参：
   - 返回 `str` ⇒ **原样**作为工具结果（应为合法信封字符串）；
   - 返回 `dict` ⇒ 自动包成 `{"status":"ok","result":{...}}`；
-  - 推荐统一用 `core.tools.envelope` 的 `ok(...)` / `error(...)`。
+  - 推荐统一用 `core.tools.envelope` 的 `ok(...)` / `error(...)`。技能若同时用于
+  **android-agent / kelivo-agent**，请用 try/except 兼容导入（优先技能目录的 `_envelope`、
+  回退 `core.tools.envelope`），避免只认单一运行时：
+
+  ```python
+  try:
+      from _envelope import ok, error
+  except ImportError:
+      from core.tools.envelope import ok, error
+  ```
 - 异常：分发器会兜底捕获并返回 `{"status":"error",...,"code":"internal"}`；
   但仍建议显式 `error(...)` 以给出可控信息。
 - **不要**在 `run` 里 `sys.exit()` / 期待 `print` 被捕获：进程内执行，`print` 只是打到 agent 控制台，
@@ -242,23 +263,24 @@ sys.exit(1)
 # skill: mytool
 # description: 演示用工具
 # usage:
-#   arguments.mode = raw（默认）
+#   arguments.action = raw（默认）
 #   arguments.query = 关键词
-#   示例: {"mode": "raw", "query": "hello"}
+#   示例: {"action": "raw", "query": "hello"}
 from core.tools.envelope import ok, error
 from ._impl import do_raw  # 或把逻辑直接写在 run 内
 
 
 def run(arguments):
     a = arguments or {}
-    mode = a.get("mode", "raw")
+    action = a.get("action", "raw")
     query = a.get("query", "")
-    if mode == "raw":
+    if action == "raw":
         return ok(do_raw(query))
-    return error(f"未知 mode '{mode}'", code="unknown_action")
+    return error(f"未知 action '{action}'", code="unknown_action")
 ```
 
-要点：`sys.argv` → `arguments`；`print(json)` → `return ok(...)`；`sys.exit` → `return error(...)`。
+要点：`sys.argv` → `arguments`；操作选择器统一 `action`（不用 `mode`/`cmd`）；
+`print(json)` → `return ok(...)`；`sys.exit` → `return error(...)`。
 
 ---
 
@@ -301,6 +323,8 @@ python -c "from core.tools.skill_tool import skill_tool; print(skill_tool(skill=
 | 助手模块跨目录用绝对导入（`import _impl`） | 导入失败 | 用相对导入 `from ._impl import ...` 或 `from skill.<名称>._impl import ...` |
 | 真实密钥写进 `config.json` 并提交 | 泄密 | 只提交 `config.example.json` |
 | `# status:` 写在 `# usage:` 之后 | 状态不生效（默认 enable） | 状态声明放在 `usage` 之前 |
+| 用 `mode` / `cmd` / `api` 作操作选择器 | 与全仓库约定不一致，模型调用易混 | 统一改为 `action` |
+| 参数键用 CamelCase / kebab-case（`fileName` / `max-len`） | 调用易错、不统一 | 用小写 `snake_case` |
 
 ---
 
@@ -311,7 +335,9 @@ python -c "from core.tools.skill_tool import skill_tool; print(skill_tool(skill=
 - [ ] 有 `# description:` 与 `# usage:`（含参数取值与示例）
 - [ ] 如需隐藏，加 `# status: disable`（放在 `usage` 之前）；默认不写即披露
 - [ ] 定义了模块级 `def run(arguments)`
+- [ ] 操作选择器统一 `action`（不用 `cmd`/`mode`/`api`）；参数键小写 `snake_case`
 - [ ] 取参用 `a.get(..., default)`；返回 `ok()`/`error()` 信封
+- [ ] 若技能需跨运行时（shell-tool + 移动端），信封用 try/except 兼容导入
 - [ ] 无 import 期副作用；无 `sys.exit`；结果靠 `return` 而非 `print`
 - [ ] 助手模块以 `_` 开头、未加 `# skill:` 头、用相对导入引用
 - [ ] 配置同目录：只提交 `config.example.json`，`config.json` 不入库
