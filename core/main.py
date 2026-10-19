@@ -16,7 +16,7 @@ from . import events
 from .console import console, render_table
 from .tools import get_system_info
 from .tools.skill_tool import disclosed_skills, set_status, skills_overview
-from .tools.skill_hub import remote_skills, install as hub_install, source_label as hub_source
+from .tools.skill_hub import remote_skills, install as hub_install, remove as hub_remove, source_label as hub_source
 from .recall import (
     openviking_load_context,
     openviking_load_profile,
@@ -32,7 +32,8 @@ USAGE = """使用方法：python dp.py [选项] [问题]
   -n, --new    → 终结当前对话，并新开一个对话
   -s, --session [id] → 不带 id：列出最近 5 条会话；带 id：继续指定会话（可指定历史会话）
   -S, --skill [名称] [enable|disable] → 不带参数：列出全部 skill 及 status；带参数：开关该 skill 的 status
-  -I, --install [名称] → 不带名称：列出远程可装 skill；带名称：从远程仓库下载安装到本地 skill/
+  -I, --install [名称...] → 不带名称：列出远程可装 skill；带名称（可多个，空格分隔）：从远程仓库下载安装到本地 skill/
+  -D, --delete <名称...> → 删除已安装的本地 skill 文件夹（可多个，空格分隔）
   -k, --key <key>    → 覆盖 DEEPSEEK_API_KEY，并写回 .env
   -m, --model <name> → 覆盖 DEEPSEEK_MODEL，并写回 .env
   不加参数     → 查看此帮助
@@ -43,7 +44,7 @@ def parse_args(argv):
     """解析命令行参数，返回
     (new_flag, session_id, list_sessions, question, api_key, model,
      skill_status, show_skills, hub_action)
-    hub_action: None | ('list', None) | ('install', 名称)"""
+    hub_action: None | ('list', None) | ('install', [名称...]) | ('delete', [名称...])"""
     new_flag = False
     sid = None
     list_sessions = False
@@ -73,13 +74,30 @@ def parse_args(argv):
                       "（不带参数则列出全部 skill）")
                 sys.exit(1)
         elif a in ('-I', '--install'):
-            if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
-                hub_action = ('install', argv[i + 1])
-                i += 2
+            names = []
+            j = i + 1
+            while j < len(argv) and not argv[j].startswith('-'):
+                names.append(argv[j])
+                j += 1
+            if names:
+                hub_action = ('install', names)
+                i = j
             else:
                 # 不带参数 → 列出远程可装 skill
                 hub_action = ('list', None)
                 i += 1
+        elif a in ('-D', '--delete'):
+            names = []
+            j = i + 1
+            while j < len(argv) and not argv[j].startswith('-'):
+                names.append(argv[j])
+                j += 1
+            if names:
+                hub_action = ('delete', names)
+                i = j
+            else:
+                print("⚠️  -D/--delete 需要指定 skill 名称（可用 -S 查看已装 skill）")
+                sys.exit(1)
         elif a in ('-s', '--session'):
             if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
                 sid = argv[i + 1]
@@ -267,15 +285,29 @@ async def _async_main():
         if action == 'list':
             print_remote_skills()
             sys.exit(0)
-        try:
-            res = hub_install(name)
-        except RuntimeError as e:
-            print(f"⚠️  安装失败：{e}")
-            sys.exit(1)
-        extra = "，已生成 config.json（请填配置）" if res.get("config_created") else ""
-        deps = "，依赖：" + ", ".join(res["requires"]) if res.get("requires") else ""
-        print(f"✅ 已安装 skill '{res['name']}'（{len(res['files'])} 个文件{extra}{deps}）")
-        sys.exit(0)
+        if action == 'delete':
+            failed = 0
+            for skill_name in name:
+                try:
+                    res = hub_remove(skill_name)
+                except RuntimeError as e:
+                    print(f"⚠️  删除失败 '{skill_name}'：{e}")
+                    failed += 1
+                    continue
+                print(f"✅ 已删除 skill '{res['name']}'")
+            sys.exit(0 if not failed else 1)
+        failed = 0
+        for skill_name in name:
+            try:
+                res = hub_install(skill_name)
+            except RuntimeError as e:
+                print(f"⚠️  安装失败 '{skill_name}'：{e}")
+                failed += 1
+                continue
+            extra = "，已生成 config.json（请填配置）" if res.get("config_created") else ""
+            deps = "，依赖：" + ", ".join(res["requires"]) if res.get("requires") else ""
+            print(f"✅ 已安装 skill '{res['name']}'（{len(res['files'])} 个文件{extra}{deps}）")
+        sys.exit(0 if not failed else 1)
 
     # -k/-m：覆盖并写回 .env，本次进程与后续进程（含 8000 端口调用）均生效
     updates = {}
