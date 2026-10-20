@@ -346,6 +346,20 @@ def load_messages(session_id):
     return _build_msgs(rows)
 
 
+def has_message_with_prefix(session_id, prefix):
+    """会话中是否已有以 prefix 开头的内容（用于一次性注入的上下文消息去重）。
+
+    用 substr 做精确前缀匹配，避免 LIKE 通配符转义问题。
+    """
+    if not prefix:
+        return False
+    with _sqlite_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM chat_messages WHERE session_id=? AND substr(content, 1, ?) = ? LIMIT 1",
+            (session_id, len(prefix), prefix)).fetchone()
+    return row is not None
+
+
 # ============= 在线同步（SQLite → MySQL，幂等） =============
 def _sync_pending():
     """把 SQLite 中 synced=0 的会话/消息推送到在线 MySQL。

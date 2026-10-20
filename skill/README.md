@@ -110,10 +110,13 @@ def run(arguments: dict) -> str | dict: ...
 
 `# status: enable | disable`（缺省 = `enable`）只控制**是否把该 skill 披露给模型**：
 
-- 披露位置有二：原生 `skill` 工具的 schema 描述（`core/tools/__init__.py`）与系统提示词
-  （`core/main.py:build_system_prompt`）；两处都只列 `enable` 的 skill。
+- 披露位置：新建会话时一次性写入的首条上下文消息（`core/main.py:build_skill_banner`），
+  只列 `enable` 的 skill；消息随会话持久化，后续轮次原样复用。`skill` 工具 schema 与
+  系统提示词均保持静态，不随 skill 增删变化。
+- 会话内新增 / 删除 / 改名 / 切换 status 都不会改写已注入名单（新会话才重新生成）；
+  需要最新列表时调用 `skill(all=true)` 实时获取（该结果也是 `enable` 过滤后的实时值）。
 - **不影响执行逻辑**：`disable` 的 skill 仍在注册表 `REGISTRY` 中，按名称仍可
-  `skill='名称'` 查看用法与执行；只是模型在工具列表 / 系统提示词里看不到它，不会被引导去调用。
+  `skill='名称'` 查看用法与执行；只是不会出现在注入名单里，模型不会被引导去调用。
 - 用途：临时下线某个能力而不删脚本，或不希望模型主动调用（如调试 / 高危工具）。
 - 快捷开关：`python dp.py -S <名称> <enable|disable>` 直接改写对应入口头部的
   `# status:` 行；`python dp.py -S` 不带参数则列出全部 skill 及 status / 说明（均不进入对话）。

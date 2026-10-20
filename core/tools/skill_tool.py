@@ -327,7 +327,8 @@ def set_status(name, status):
             f.write(fixed.encode("utf-8-sig" if has_bom else "utf-8"))
     except OSError as e:
         return False, f"写入失败 - {e}"
-    return True, f"skill '{name}' 的 status 已设为 {value}"
+    return True, (f"skill '{name}' 的 status 已设为 {value}"
+                  "（新会话生效；当前会话可 skill(all=true) 查看实时列表）")
 
 
 def _load_run(meta):

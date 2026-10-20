@@ -10,7 +10,7 @@ import re
 
 from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
-from .skill_tool import skill_tool, disclosed_skills
+from .skill_tool import skill_tool
 from .skill_hub import skill_hub
 from .. import config
 from .. import events
@@ -26,12 +26,9 @@ __all__ = [
 
 
 # 工具定义列表（符合 OpenAI/DeepSeek 的 tool 格式）
-# 原生 tool：系统信息 / 命令执行 / skill 统一入口（skill 列表由 skill/ 目录自动注册）。
-# skill 名称与说明摘要由注册表运行时生成，新增脚本即自动出现在工具描述中。
-# 仅披露 status 非 disable 的 skill（disclosed_skills）；disable 者不进入工具 schema。
-_SKILL_SUMMARY = "、".join(f"{name}={desc}" for name, desc in disclosed_skills().items()) or "(空)"
-_SKILL_NAMES = " / ".join(disclosed_skills()) or "(空)"
-
+# 原生 tool：系统信息 / 命令执行 / skill 统一入口。
+# schema 保持完全静态：skill 名称与说明属于会变化的内容，放在会话首条上下文消息里，
+# 避免安装 / 卸载 / 改名导致 tools 段变化、击穿前缀缓存。运行时列表一律走 skill(all=true)。
 TOOLS = [
     {
         "type": "function",
@@ -67,7 +64,7 @@ TOOLS = [
         "function": {
             "name": "skill",
             "description": (
-                f"skill 合集（由 skill/ 目录脚本自动注册）：{_SKILL_SUMMARY}。"
+                "skill 合集（由 skill/ 目录脚本自动注册）。"
                 "all=true 列出所有 skill 及说明；skill='名称' 查看用法；"
                 "skill='名称' 并传 arguments={参数} 执行。"
             ),
@@ -80,7 +77,7 @@ TOOLS = [
                     },
                     "skill": {
                         "type": "string",
-                        "description": f"要查询或执行的 skill 名称，如 {_SKILL_NAMES}"
+                        "description": "要查询或执行的 skill 名称；完整列表见会话中的 skill 上下文或用 all=true 获取"
                     },
                     "arguments": {
                         "type": "object",
