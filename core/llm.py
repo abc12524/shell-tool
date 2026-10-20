@@ -35,6 +35,10 @@ def to_responses_input(messages):
     items = []
     for m in messages:
         role = m.get('role')
+        if role == db.INSERT_USER_ROLE:
+            # 合成注入消息（skill 名单 / OV 块）落库与内存都用该标记，
+            # 发给模型前统一按 user 处理。
+            role = 'user'
         if role in ('system', 'user'):
             items.append({"role": role, "content": m.get('content') or ''})
         elif role == 'assistant':
@@ -102,6 +106,8 @@ def to_chat_messages(messages):
     out = []
     for m in messages:
         role = m.get('role')
+        if role == db.INSERT_USER_ROLE:
+            role = 'user'
         if role in ('system', 'user'):
             out.append({"role": role, "content": m.get('content') or ''})
         elif role == 'assistant':
@@ -632,7 +638,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         if config.OV_INJECT in ('step', 'both'):
             step_recall = openviking_load_context(messages, session_id=session_id)
             if step_recall:
-                recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
+                recall_msg = {"role": db.INSERT_USER_ROLE, "content": wrap_recall_block(step_recall)}
                 messages.append(recall_msg)
                 _persist(session_id, ov_session_id, [recall_msg])
 
@@ -655,7 +661,7 @@ async def chat_completion_with_tools(client, messages, session_id=None, ov_sessi
         if config.OV_INJECT in ('step', 'both'):
             step_recall = openviking_load_context(messages, session_id=session_id)
             if step_recall:
-                recall_msg = {"role": "user", "content": wrap_recall_block(step_recall)}
+                recall_msg = {"role": db.INSERT_USER_ROLE, "content": wrap_recall_block(step_recall)}
                 messages.append(recall_msg)
                 _persist(session_id, ov_session_id, [recall_msg])
         content, reasoning, tool_calls, output_items, usage = await stream_llm(client, messages, session_id=session_id)

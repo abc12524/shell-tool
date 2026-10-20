@@ -19,6 +19,7 @@ import re
 import requests
 
 from . import config
+from .db import INSERT_USER_ROLE
 
 
 # ============= 基础请求（本模块独立实现，仅供召回/抓取使用）=============
@@ -169,6 +170,9 @@ def _msg_query_text(m):
         return ''
     role = m.get('role')
     content = m.get('content') or ''
+    if role == INSERT_USER_ROLE:
+        # 合成注入消息：不参与检索 query，避免自反馈
+        return ''
     if role == 'user':
         if RECALL_MARKER in content or PROFILE_MARKER in content:
             return ''
@@ -532,6 +536,10 @@ def _to_ov_messages(messages):
         if isinstance(content, list):
             content = "\n".join(str(c) for c in content)
         content = content or ""
+
+        # 合成注入消息（skill 名单 / OV 块）不写回 OV，避免污染记忆
+        if role == INSERT_USER_ROLE:
+            continue
 
         # 跳过注入块（召回记忆 / 会话索引），防止把 OV 检索结果当对话回灌
         if RECALL_MARKER in content or PROFILE_MARKER in content:

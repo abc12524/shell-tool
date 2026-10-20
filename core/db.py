@@ -79,6 +79,17 @@ def online_enabled():
     return _sync_enabled
 
 
+# 合成注入的用户消息角色（skill 名单 / OV profile / OV 召回块）。
+# 只改变落库标识，便于与真实用户输入区分；读取/重放时统一映射回 'user'，
+# 因此旧库（role='user'）与既有调用方都不受影响。
+INSERT_USER_ROLE = 'insert_user'
+
+
+def _chat_role(role):
+    """DB 角色 → 聊天协议角色：insert_user 在模型看来就是 user。"""
+    return 'user' if role == INSERT_USER_ROLE else role
+
+
 # ============= 连接 =============
 def _mysql_conn():
     cfg = dict(DB_CONFIG)
@@ -360,6 +371,22 @@ def has_message_with_prefix(session_id, prefix):
     return row is not None
 
 
+def load_injected_contents(session_id, prefixes):
+    """按 id 升序返回会话内以任一 prefix 开头的消息内容（用于增量注入的已声明状态）。"""
+    prefixes = [p for p in (prefixes or []) if p]
+    if not prefixes:
+        return []
+    cond = " OR ".join("substr(content, 1, ?) = ?" for _ in prefixes)
+    params = [session_id]
+    for p in prefixes:
+        params.extend([len(p), p])
+    with _sqlite_conn() as conn:
+        rows = conn.execute(
+            f"SELECT content FROM chat_messages WHERE session_id=? AND ({cond}) ORDER BY id",
+            params).fetchall()
+    return [r['content'] or '' for r in rows]
+
+
 # ============= 在线同步（SQLite → MySQL，幂等） =============
 def _sync_pending():
     """把 SQLite 中 synced=0 的会话/消息推送到在线 MySQL。
@@ -415,7 +442,9 @@ def _sync_pending():
 def _build_msgs(rows):
     msgs = []
     for row in rows:
-        role = row['role']
+        # 注入消息（skill 名单 / OV 块）落库为 insert_user，这里映射回 user，
+        # 保证重放给模型的序列与旧库（role='user'）完全一致。
+        role = _chat_role(row['role'])
         if role == 'assistant' and row['tool_calls_json']:
             m = {
                 'role': 'assistant',

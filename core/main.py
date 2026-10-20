@@ -2,6 +2,7 @@
 """CLI 主流程：参数解析、session 管理、记忆注入、对话执行"""
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -232,20 +233,57 @@ def print_recent_sessions(limit=5):
     console.print("继续会话：python dp.py -s <id> \"你的问题\"", style="dim")
 
 
-# 会话级 skill 名单消息标记：只注入一次并持久化，之后原样复用，保持前缀缓存稳定。
+# 会话级 skill 名单：首轮全量注入；之后每轮重新检测，只增量注入新增的 skill。
+# 减少/禁用的 skill 不做处理（已注入内容留在历史里），保证前缀缓存稳定。
 SKILL_BANNER_MARK = "[上下文] 当前可用 skill"
+SKILL_UPDATE_MARK = "[上下文] 新增可用 skill"
 
 
-def build_skill_banner():
-    """构建一次性注入的 skill 名单消息（会写入会话历史，因此此后不再重算）。"""
-    skills = sorted(disclosed_skills().items())
+def _skill_lines(skills):
+    """skill 名单正文：name：description（空列表也占一行，避免空块歧义）。"""
+    return [f"- {name}：{desc}" for name, desc in sorted(skills.items())] or ["- (空)"]
+
+
+def build_skill_banner(skills):
+    """构建首轮全量注入的 skill 名单消息（写入会话历史，此后不再重算）。"""
     lines = [SKILL_BANNER_MARK + "（供调用 skill 工具时参考，不是用户请求）："]
-    if skills:
-        lines.extend(f"- {name}：{desc}" for name, desc in skills)
-    else:
-        lines.append("- (空)")
+    lines.extend(_skill_lines(skills))
     lines.append("完整 / 最新列表：调用 skill 工具并传 all=true。")
     return "\n".join(lines)
+
+
+def build_skill_update(skills):
+    """构建增量注入的新增 skill 消息（只含本次新增项）。"""
+    lines = [SKILL_UPDATE_MARK + "（供调用 skill 工具时参考，不是用户请求）："]
+    lines.extend(_skill_lines(skills))
+    lines.append("完整 / 最新列表：调用 skill 工具并传 all=true。")
+    return "\n".join(lines)
+
+
+def announced_skill_names(session_id):
+    """从会话内已注入的名单/增量消息里解析出已声明过的 skill 名。"""
+    names = set()
+    for content in db.load_injected_contents(session_id, (SKILL_BANNER_MARK, SKILL_UPDATE_MARK)):
+        for line in content.splitlines():
+            m = re.match(r'^- ([^：]+)：', line)
+            if m:
+                names.add(m.group(1).strip())
+    return names
+
+
+def inject_skill_delta(session_id):
+    """首轮写全量名单；之后每轮检测当前 skill，只把新增项增量写入。
+
+    减少（删除/禁用）的 skill 不处理：历史里已声明过的内容保留，模型仍可按名调用。
+    """
+    current = disclosed_skills()
+    if not db.has_message_with_prefix(session_id, SKILL_BANNER_MARK):
+        db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_banner(current)}])
+        return
+    announced = announced_skill_names(session_id)
+    new_skills = {name: desc for name, desc in current.items() if name not in announced}
+    if new_skills:
+        db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_update(new_skills)}])
 
 
 def build_system_prompt():
@@ -383,11 +421,10 @@ async def _async_main():
     # system prompt 固定在最前（跨轮一致，便于命中前缀缓存）
     system_prompt = build_system_prompt()
 
-    # 注入 skill 名单：每个会话只写一次并持久化；后续轮次与 resume 都原样复用，
-    # 只追加不重算，因此会话内新增/删除 skill 也不会改变已有前缀（缓存不失效）。
+    # 注入 skill 名单：首轮全量写入；之后每轮检测新增 skill 并增量追加入库。
+    # 只追加不重算，因此会话中途安装新 skill 也不会改变已有前缀（缓存不失效）。
     # 名单消息不进 OV 抓取，避免污染记忆。
-    if not db.has_message_with_prefix(session_id, SKILL_BANNER_MARK):
-        db.append_messages(session_id, [{"role": "user", "content": build_skill_banner()}])
+    inject_skill_delta(session_id)
 
     # 当前问题先入库（作为历史的一部分）
     db.append_messages(session_id, [{"role": "user", "content": question}])
@@ -402,7 +439,7 @@ async def _async_main():
         profile_ctx = openviking_load_profile()
         events.ev_memory("profile", bool(profile_ctx))
         if profile_ctx:
-            profile_msg = {"role": "user", "content": profile_ctx}
+            profile_msg = {"role": db.INSERT_USER_ROLE, "content": profile_ctx}
             db.append_messages(session_id, [profile_msg])
             if config.OV_CAPTURE:
                 openviking_capture(ov_session_id, [profile_msg])
@@ -413,7 +450,7 @@ async def _async_main():
         mem_context = openviking_load_context([{"role": "user", "content": question}], session_id=session_id)
         events.ev_memory("recall", bool(mem_context))
         if mem_context:
-            db.append_messages(session_id, [{"role": "user", "content": wrap_recall_block(mem_context)}])
+            db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": wrap_recall_block(mem_context)}])
 
     # 加载历史（含各问题及其后注入）作为完整消息序列
     stored = db.load_messages(session_id)
