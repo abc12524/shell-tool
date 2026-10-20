@@ -1,17 +1,15 @@
 # shell-tool — 命令行 AI 助手
 
-基于 DeepSeek 的流式命令行 AI 助手：支持系统命令执行、百度搜索、OpenViking 外置记忆存取，对话记录持久化到 MySQL（可切换本地 SQLite），并提供 HTTP API 服务（含 SSE 流式输出）。
+基于 DeepSeek 的流式命令行 AI 助手：支持系统命令执行、脚本编辑、OpenViking 记忆注入与抓取，对话记录持久化到 MySQL（可切换本地 SQLite），并提供 HTTP API 服务（含 SSE 流式输出）。
 
 ## 功能特性
 
 - **系统命令执行** — 跨平台执行 Linux/macOS (bash) 与 Windows (PowerShell/CMD) 命令
-- **技能体系（skill）** — 除系统工具外，OpenViking 记忆（`ov`）、脚本/代码编辑（`script`）、百度搜索（`baidu_search`）均下沉为 `skill/` 目录脚本；支持两种布局（扁平 `skill/*.py` 与文件夹 `skill/<名称>/skill.py`+配置/助手模块），按脚本头部标准结构自动注册，新增能力只需新增脚本或文件夹，无需改动核心
+- **技能体系（skill）** — 除系统工具外，脚本/代码编辑（`script`）等能力下沉为 `skill/` 目录脚本；采用文件夹布局（`skill/<名称>/skill.py`+配置/助手模块），按脚本头部标准结构自动注册，新增能力只需新增文件夹，无需改动核心
 - **远程技能仓库（skill_hub）** — 从 GitHub / Gitea 仓库（默认 `abc12524/shell-skills`）拉取根索引 `index.json` 查看可装技能（含平台/依赖），按需下载整包到本地 `skill/` 并热注册；CLI `-I` 安装 / `-D` 删除 或原生 `skill_hub` 工具均可
 - **脚本增删改查** — 数据源为本地 `file_path`（可写，改后写回原文件）或 http(s) `url`（只读），工具自动探测编码（utf-8/gb18030/big5 等）；read 支持按 `symbol`（单个/数组）/`pattern` 正则批量、按 `start_line~end_line` 取片段（带行号、可 `limit` 分页），或返回带行号的 `outline` 骨架；改/增/删采用精确字符串替换（对齐 edit 工具，唯一匹配、支持 `replace_all`）
-- **百度搜索** — 通过百度千帆引擎搜索网页 / 查询百科
-- **OpenViking 记忆** — 语义搜索历史记忆、保存用户偏好/项目信息/决策、读取与写入记忆文件、Session 管理
 - **对话持久化** — 先落本地 SQLite（唯一读写源），再幂等同步到在线 MySQL，支持继续/新建/指定会话
-- **记忆注入** — 每轮对话前自动检索相关记忆并注入上下文
+- **OpenViking 记忆注入 / 抓取** — 每轮对话前自动检索相关记忆并注入上下文，可将对话写入 OV session 并提交提取记忆
 - **流式输出** — 展示思考过程（reasoning）与最终回答
 - **多协议接入** — 除 DeepSeek 官方 Responses API 外，支持 OpenAI 兼容 Chat Completions 网关（OpenCode Zen / OpenCode Go，含 `deepseek-v4.1-flash` 等模型）
 - **HTTP API** — 提供 `/chat`（同步）与 `/chat/stream`（SSE 流式）接口
@@ -29,36 +27,20 @@ shell-tool/
 │   ├── recall.py             # 记忆召回/抓取（自动注入 + OV 会话上传，独立于 skill）
 │   └── tools/
 │       ├── system_tools.py   # 系统信息 / 命令执行（原生 tool）
-│       ├── skill_tool.py     # skill 注册表：扫描 skill/ 自动注册（扁平 + 文件夹）+ 分发执行
+│       ├── skill_tool.py     # skill 注册表：扫描 skill/ 自动注册（文件夹）+ 分发执行
 │       ├── skill_hub.py      # 远程技能仓库：查看 / 下载 / 卸载 skill
 │       └── __init__.py       # 原生工具 schema（get_system_info/execute_system_command/skill/skill_hub）+ 分发器
-├── skill/                    # skill 目录：按头部标准结构自动注册（两种布局可混用）
-│   ├── ov/                   # skill: ov           —— OpenViking 记忆统一入口（文件夹式，自包含）
-│   │   ├── skill.py
-│   │   ├── _ov_impl.py       # 助手实现（`_` 开头，不注册）
-│   │   └── config.example.json
-│   ├── at/                   # skill: at           —— 定时任务（文件夹式）
-│   │   └── skill.py
+├── skill/                    # skill 目录：按头部标准结构自动注册
 │   ├── script/               # skill: script       —— 脚本/代码增删改查
 │   │   ├── skill.py
 │   │   └── _script_impl.py   # 助手实现（`_` 开头，不注册）
-│   ├── baidu_search/         # skill: baidu_search —— 百度搜索 / 百科
-│   │   ├── skill.py
-│   │   └── config.example.json
-│   └── doubao_search/        # skill: doubao_search —— 豆包搜索 API
-│       ├── skill.py
-│       └── config.example.json
 ├── server/
 │   └── api.py                # Flask HTTP API（同步 + SSE 流式）
 └── .env.example              # 环境变量模板
 
 ### 新增 skill
 
-两种布局二选一（推荐文件夹式，可把脚本与配置/助手模块放一起）：
-
-**扁平**：`skill/<名称>.py`
-
-**文件夹**：`skill/<名称>/skill.py`（入口），助手模块以 `_` 开头，配置写 `config.json`（模板 `config.example.json`）。
+新增一个文件夹 `skill/<名称>/`，入口为 `skill.py`，助手模块以 `_` 开头，配置写 `config.json`（模板 `config.example.json`）。
 
 入口文件头部按标准结构声明即可自动注册，无需改动核心：
 
@@ -88,7 +70,7 @@ def run(arguments: dict) -> str:
 
 ```bash
 python dp.py -I            # 列出远程可装 skill（含平台 / 依赖 / 是否已装）
-python dp.py -I at         # 下载 at 到本地 skill/at 并热注册
+python dp.py -I <名称>     # 下载 <名称> 到本地 skill/<名称> 并热注册
 ```
 
 模型侧亦可通过原生 `skill_hub` 工具（`action=list|install|remove`, `name=<名称>`）操作。
@@ -134,7 +116,6 @@ cp .env.example .env
 | `DB_ONLINE` | 在线 MySQL 同步开关：`true`=开启同步（默认 true；未配置或连接失败则仅用 SQLite），`false`=关闭 |
 | `SQLITE_DB_PATH` | 本地 SQLite 文件路径（唯一读写源，默认 `data/shell_tool.db`） |
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | 在线 MySQL（同步副本）连接信息 |
-| `BAIDU_QIANFAN_KEY` | 百度千帆搜索密钥（`skill/baidu_search.py`） |
 | `OPENVIKING_URL/KEY/USER` | OpenViking 外置记忆服务 |
 
 ### 接入 OpenCode Go（deepseek-v4.1-flash）
@@ -154,7 +135,7 @@ LLM_USER_AGENT=shell-tool/1.0
 ```
 
 - `DEEPSEEK_API_TYPE`：`chat` 走 Chat Completions（OpenAI 兼容网关）；`responses`（默认）走 DeepSeek 官方 Responses API。
-  Chat 模式下服务端内置 `web_search`（`LLM_WEB_SEARCH`）不生效，搜索请用 `baidu_search` skill。
+  Chat 模式下服务端内置 `web_search`（`LLM_WEB_SEARCH`）不生效。
 - `LLM_PROVIDER=opencode-go`：启用 OpenCode Go 计费口径（美元、UTC 峰谷 01:00-04:00 / 06:00-10:00，无余额接口）；
   留空时按 `DEEPSEEK_BASE_URL` 自动推断。
 - `LLM_SESSION_HEADER` / `LLM_USER_AGENT`：OpenCode Go 建议客户端以自有 UA 标识、并按会话稳定携带 session 头，
@@ -194,8 +175,8 @@ python dp.py -m deepseek-v4-pro "换个模型回答"
 python dp.py -S
 
 # 开关某 skill 的 status（改脚本头部，不进入对话；disable 即不向 LLM 披露）
-python dp.py -S ov disable
-python dp.py -S ov enable
+python dp.py -S script disable
+python dp.py -S script enable
 
 # 查看帮助
 python dp.py
@@ -268,7 +249,7 @@ curl http://localhost:8000/health
 
 对话开始时批量并行执行模型请求的全部工具调用，结果一次性回传后直接输出最终回答；若模型在最终轮仍请求调用工具，在 `MAX_TOOL_ROUNDS` 预算内可再执行，超出则强制基于已有结果作答。所有工具统一返回规范信封 `{"status":"ok","result":{...}}` / `{"status":"error","error":...}`，与 OpenViking 后端及 DSH 会话格式保持一致。
 
-模型面向的原生工具只有 `get_system_info`、`execute_system_command`、`skill` 三个；其中 `skill` 负责列出 / 查看用法 / 执行 `skill/` 目录下的脚本（`ov` / `script` / `baidu_search`），脚本在进程内执行，新增脚本即自动注册。
+模型面向的原生工具只有 `get_system_info`、`execute_system_command`、`skill` 三个；其中 `skill` 负责列出 / 查看用法 / 执行 `skill/` 目录下的脚本（`script`），脚本在进程内执行，新增脚本即自动注册。
 
 ## 安全说明
 

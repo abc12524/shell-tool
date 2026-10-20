@@ -69,7 +69,7 @@ def parse_args(argv):
                 show_skills = True
                 i += 1
             else:
-                print("⚠️  -S/--skill 需要 <名称> <enable|disable>，例如：-S ov disable"
+                print("⚠️  -S/--skill 需要 <名称> <enable|disable>，例如：-S script disable"
                       "（不带参数则列出全部 skill）")
                 sys.exit(1)
         elif a in ('-I', '--install'):

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """工具包：原生 function 工具（系统信息 / 命令执行 / skill 合集）+ 工具调用分发器
 
-tool 层只保留与运行环境强相关的少量原生工具；ov（OpenViking 记忆）、
-script（脚本/代码编辑）、baidu_search（百度搜索）等一律下沉为 skill/ 目录下的脚本，
-由 skill_tool 扫描脚本头部自动注册并在进程内执行。
+tool 层只保留与运行环境强相关的少量原生工具；script（脚本/代码编辑）
+等一律下沉为 skill/ 目录下的脚本，由 skill_tool 扫描脚本头部自动注册并在进程内执行。
 """
 import asyncio
 import json
@@ -122,7 +121,7 @@ TOOLS = [
 ]
 
 
-# DeepSeek Responses API 内置 web 搜索工具（服务端自动执行，区别于 skill 里的 baidu_search）。
+# DeepSeek Responses API 内置 web 搜索工具（服务端自动执行）。
 # 由 .env 的 LLM_WEB_SEARCH 控制开关；关闭后模型不再被提供该能力。
 if config.LLM_WEB_SEARCH:
     TOOLS.append({"type": "web_search"})

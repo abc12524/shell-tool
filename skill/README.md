@@ -3,8 +3,7 @@
 把任意 Python 脚本改造为 shell-tool 可自动注册的 **skill**。读完后你应当能独立完成
 "任意 `.py` → 合规 skill" 的转换，无需修改核心代码。
 
-> 本文件是说明文档，不会被注册。注册器只认两种布局：扁平 `skill/*.py` 与
-> 文件夹 `skill/*/skill.py`（见 §1）。
+> 本文件是说明文档，不会被注册。注册器只认文件夹布局：`skill/*/skill.py`（见 §1）。
 
 ---
 
@@ -12,19 +11,17 @@
 
 - skill 目录：项目根的 `skill/`。
 - 核心只暴露一个原生工具 `skill`，模型通过它列表 / 查用法 / 执行。
-- 注册器（`core/tools/skill_tool.py`）在启动时扫描 `skill/`，支持两种布局（可混用）：
+- 注册器（`core/tools/skill_tool.py`）在启动时扫描 `skill/`，识别文件夹布局：
 
-  | 布局 | 位置 | 导入模块 |
-  |---|---|---|
-  | 扁平 | `skill/<名称>.py` | `skill.<名称>` |
-  | 文件夹（推荐） | `skill/<名称>/skill.py` | `skill.<名称>.skill` |
+  | 位置 | 导入模块 |
+  |---|---|
+  | `skill/<名称>/skill.py` | `skill.<名称>.skill` |
 
-  两种布局都以**入口文件**最前面连续的 `#` 注释行（头部）解析元信息，符合规范即注册；
+  以**入口文件**最前面连续的 `#` 注释行（头部）解析元信息，符合规范即注册；
   未声明 `# skill:` 的脚本不注册（可作被 import 的助手模块）。
 - 执行时按需 `importlib` 导入入口模块并调用其 `run(arguments)`，**进程内运行**。
-- **文件夹式**把入口脚本、助手模块、配置文件放在同一文件夹内，更适合逻辑复杂 / 需要
-  密钥的技能；推荐新技能一律用文件夹式。
-- 一个入口 = 一个 skill（`ov` / `script` / `baidu_search` / `at` 就是这样各占一项）。
+- 把入口脚本、助手模块、配置文件放在同一文件夹内，更适合逻辑复杂 / 需要密钥的技能。
+- 一个入口 = 一个 skill（`script` 就是这样占一项）。
 
 ---
 
@@ -57,12 +54,7 @@
 
 ### 2.2 入口文件与命名
 
-**扁平布局** `skill/<名称>.py`：
-
-1. 文件名 `*.py`，且**不以 `_` 开头**（`__init__.py` / `_helper.py` 会被跳过）。
-2. 推荐**文件名 stem == skill 名称**（注册键取头部名称，模块按文件名导入）。
-
-**文件夹布局**（推荐） `skill/<名称>/`：
+**文件夹布局** `skill/<名称>/`：
 
 1. 文件夹名 == skill 名称；入口文件固定为 `skill.py`（头部声明名称，建议与文件夹名一致）。
 2. 助手模块放在同一文件夹、以 `_` 开头（如 `_impl.py`），入口用**相对导入**引用它：
@@ -76,7 +68,7 @@
 
 ### 2.3 必须定义入口函数
 
-无论哪种布局，入口模块都要定义模块级函数：
+入口模块要定义模块级函数：
 
 ```python
 def run(arguments: dict) -> str | dict: ...
@@ -142,7 +134,7 @@ def run(arguments: dict) -> str | dict: ...
 
 ## 3. 脚本模板
 
-**文件夹式**（推荐）目录：
+目录：
 
 ```
 skill/my_name/
@@ -175,8 +167,6 @@ def run(arguments):
         return ok({"result": "..."})
     return error(f"未知 action '{action}'", code="unknown_action")
 ```
-
-**扁平式**等价于把上面 `skill.py` 直接放成 `skill/my_name.py`（无 `_impl.py` / 配置时更简单）。
 
 ---
 
@@ -234,9 +224,7 @@ def run(arguments):
    ```
    但 skill 执行**只调用 `run`**，`__main__` 段与注册无关。
 
-6. **落盘与命名**：
-   - 文件夹式（推荐）：`skill/<名称>/skill.py`（+ 可选 `_impl.py` / `config.example.json`）；
-   - 扁平式：`skill/<名称>.py`。名称与文件夹名 / 文件名 stem 一致。
+6. **落盘与命名**：`skill/<名称>/skill.py`（+ 可选 `_impl.py` / `config.example.json`）。名称与文件夹名一致。
 
 7. **验证**（见 §7）。
 
@@ -257,7 +245,7 @@ if mode == "raw":
 sys.exit(1)
 ```
 
-**改造后** `skill/mytool/skill.py`（文件夹式）：
+**改造后** `skill/mytool/skill.py`：
 
 ```python
 # skill: mytool
@@ -313,7 +301,6 @@ python -c "from core.tools.skill_tool import skill_tool; print(skill_tool(skill=
 | 头部不在入口文件最顶 / 中间夹了空白的非注释行 | 不注册 | 头部必须最前且连续 `#` |
 | 名称含空格（`# skill: my tool`） | 不注册 | 用 `my_tool` |
 | 只有 `# description:` 没有 `# skill:` | 不注册 | 必须有 `# skill:` |
-| 扁平文件名以 `_` 开头 | 被跳过 | 改名 |
 | 文件夹里没有 `skill.py` 入口 | 不注册 | 入口命名 `skill.py` |
 | 没有 `run` 或非模块级可调用 | 执行时报错 | 定义 `def run(arguments)` |
 | import 期发请求 / 写文件 | 首次执行时副作用、可能卡住 | 移入 `run()` |
@@ -330,7 +317,7 @@ python -c "from core.tools.skill_tool import skill_tool; print(skill_tool(skill=
 
 ## 9. 检查清单
 
-- [ ] 布局二选一：`skill/<名称>/skill.py`（推荐）或 `skill/<名称>.py`
+- [ ] 布局：`skill/<名称>/skill.py`
 - [ ] 入口头部在文件最顶、连续 `#`，含 `# skill: <无空格名称>`
 - [ ] 有 `# description:` 与 `# usage:`（含参数取值与示例）
 - [ ] 如需隐藏，加 `# status: disable`（放在 `usage` 之前）；默认不写即披露

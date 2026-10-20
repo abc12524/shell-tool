@@ -67,10 +67,6 @@ LLM_WEB_SEARCH = os.environ.get('LLM_WEB_SEARCH', 'false') in ('1', 'true', 'Tru
 DEBUG_SEND_SEQ = os.environ.get('DEBUG_SEND_SEQ', '0') in ('1', 'true', 'True')
 
 # ===== OpenViking 记忆检索 =====
-# search / find 两个记忆工具的默认阈值与条数；运行时 LLM 可自主传参覆盖。
-# search 接口（上下文感知）：默认阈值 0.4，默认返回 3 条
-OV_SEARCH_THRESHOLD = float(os.environ.get('OV_SEARCH_THRESHOLD', '0.4'))
-OV_SEARCH_LIMIT = int(os.environ.get('OV_SEARCH_LIMIT', '3'))
 # find 接口（纯向量语义搜索）：默认阈值 0.4，默认返回 3 条。
 # 自动注入（openviking_load_context）也使用 find 接口，故复用本组配置。
 OV_FIND_THRESHOLD = float(os.environ.get('OV_FIND_THRESHOLD', '0.4'))
@@ -79,7 +75,7 @@ OV_FIND_LIMIT = int(os.environ.get('OV_FIND_LIMIT', '3'))
 # ===== OpenViking 集成开关（按行为正交拆分）=====
 # —— 读取：注入 ——
 # 注入时机（一个开关决定「何时把检索结果注入上下文」）：
-#   off      = 不自动注入（模型仍可主动调用 ov 工具搜索/读写记忆）
+#   off      = 不自动注入
 #   question = 每轮以用户问题为 query 检索注入（默认）
 #   step     = 每个工具轮后以整批消息为 query 检索注入
 #   both     = 两者都开
@@ -100,7 +96,7 @@ OV_CAPTURE_MAX_LENGTH = int(os.environ.get('OV_CAPTURE_MAX_LENGTH', '24000') or 
 # 工具输出按原文上传，服务端 tool_output_externalization 负责截断（阈值默认 20000）
 OV_CAPTURE_TOOL_MAX_CHARS = int(os.environ.get('OV_CAPTURE_TOOL_MAX_CHARS', '1000000') or '1000000')
 
-# —— 读取：检索调参（自动注入与 ov 工具共用）——
+# —— 读取：检索调参 ——
 # 召回 query 最小长度，过短则跳过
 OV_MIN_QUERY_LENGTH = int(os.environ.get('OV_MIN_QUERY_LENGTH', '3'))
 # 跨轮去重轮数（对齐官方 dedup_turns）：最近 N 轮已注入过的记忆 URI 不再召回，避免同一份记忆反复注入刷屏；0=关闭
@@ -113,8 +109,6 @@ OV_PROFILE_TOKEN_BUDGET = int(os.environ.get('OV_PROFILE_TOKEN_BUDGET', '1000'))
 OV_WORKSPACE_PEER = os.environ.get('OV_WORKSPACE_PEER', 'false') in ('1', 'true', 'True', 'yes')
 # 显式指定 peer（优先级最高，覆盖上面项）
 OV_PEER_ID = os.environ.get('OV_PEER_ID', '')
-# 供 skill/ov/（独立进程内技能）与本模块派生一致的 ws-* peer：统一项目根
-os.environ.setdefault('OV_PROJECT_ROOT', PROJECT_ROOT)
 
 # ===== skill 远程仓库（skill_hub 下载源）=====
 # 仓库类型：github / gitea；留空时按是否配置 SKILL_HUB_BASE 自动推断
