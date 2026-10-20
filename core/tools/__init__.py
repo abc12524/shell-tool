@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """工具包：原生 function 工具（系统信息 / 命令执行 / skill 合集）+ 工具调用分发器
 
-tool 层只保留与运行环境强相关的少量原生工具；script（脚本/代码编辑）
-等一律下沉为 skill/ 目录下的脚本，由 skill_tool 扫描脚本头部自动注册并在进程内执行。
+tool 层只保留与运行环境强相关的少量原生工具；其他能力一律下沉为 skill/ 目录下的脚本，
+由 skill_tool 扫描脚本头部自动注册并在进程内执行。
 """
 import asyncio
 import json

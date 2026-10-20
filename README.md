@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **系统命令执行** — 跨平台执行 Linux/macOS (bash) 与 Windows (PowerShell/CMD) 命令
-- **技能体系（skill）** — 除系统工具外，脚本/代码编辑（`script`）等能力下沉为 `skill/` 目录脚本；采用文件夹布局（`skill/<名称>/skill.py`+配置/助手模块），按脚本头部标准结构自动注册，新增能力只需新增文件夹，无需改动核心
+- **技能体系（skill）** — 能力以 `skill/` 目录脚本形式扩展；采用文件夹布局（`skill/<名称>/skill.py`+配置/助手模块），按脚本头部标准结构自动注册，新增能力只需新增文件夹，无需改动核心
 - **远程技能仓库（skill_hub）** — 从 GitHub / Gitea 仓库（默认 `abc12524/shell-skills`）拉取根索引 `index.json` 查看可装技能（含平台/依赖），按需下载整包到本地 `skill/` 并热注册；CLI `-I` 安装 / `-D` 删除 或原生 `skill_hub` 工具均可
 - **脚本增删改查** — 数据源为本地 `file_path`（可写，改后写回原文件）或 http(s) `url`（只读），工具自动探测编码（utf-8/gb18030/big5 等）；read 支持按 `symbol`（单个/数组）/`pattern` 正则批量、按 `start_line~end_line` 取片段（带行号、可 `limit` 分页），或返回带行号的 `outline` 骨架；改/增/删采用精确字符串替换（对齐 edit 工具，唯一匹配、支持 `replace_all`）
 - **对话持久化** — 先落本地 SQLite（唯一读写源），再幂等同步到在线 MySQL，支持继续/新建/指定会话
@@ -30,10 +30,7 @@ shell-tool/
 │       ├── skill_tool.py     # skill 注册表：扫描 skill/ 自动注册（文件夹）+ 分发执行
 │       ├── skill_hub.py      # 远程技能仓库：查看 / 下载 / 卸载 skill
 │       └── __init__.py       # 原生工具 schema（get_system_info/execute_system_command/skill/skill_hub）+ 分发器
-├── skill/                    # skill 目录：按头部标准结构自动注册
-│   ├── script/               # skill: script       —— 脚本/代码增删改查
-│   │   ├── skill.py
-│   │   └── _script_impl.py   # 助手实现（`_` 开头，不注册）
+├── skill/                    # skill 目录：按头部标准结构自动注册（可从远程仓库安装）
 ├── server/
 │   └── api.py                # Flask HTTP API（同步 + SSE 流式）
 └── .env.example              # 环境变量模板
@@ -175,8 +172,8 @@ python dp.py -m deepseek-v4-pro "换个模型回答"
 python dp.py -S
 
 # 开关某 skill 的 status（改脚本头部，不进入对话；disable 即不向 LLM 披露）
-python dp.py -S script disable
-python dp.py -S script enable
+python dp.py -S <名称> disable
+python dp.py -S <名称> enable
 
 # 查看帮助
 python dp.py
@@ -249,7 +246,7 @@ curl http://localhost:8000/health
 
 对话开始时批量并行执行模型请求的全部工具调用，结果一次性回传后直接输出最终回答；若模型在最终轮仍请求调用工具，在 `MAX_TOOL_ROUNDS` 预算内可再执行，超出则强制基于已有结果作答。所有工具统一返回规范信封 `{"status":"ok","result":{...}}` / `{"status":"error","error":...}`，与 OpenViking 后端及 DSH 会话格式保持一致。
 
-模型面向的原生工具只有 `get_system_info`、`execute_system_command`、`skill` 三个；其中 `skill` 负责列出 / 查看用法 / 执行 `skill/` 目录下的脚本（`script`），脚本在进程内执行，新增脚本即自动注册。
+模型面向的原生工具只有 `get_system_info`、`execute_system_command`、`skill` 三个；其中 `skill` 负责列出 / 查看用法 / 执行 `skill/` 目录下的脚本（当前为空，可从远程仓库安装），脚本在进程内执行，新增脚本即自动注册。
 
 ## 安全说明
 
