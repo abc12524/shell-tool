@@ -235,40 +235,46 @@ def print_recent_sessions(limit=5):
 
 # 会话级 skill 名单：首轮全量注入；之后每轮重新检测，只增量注入新增的 skill。
 # 减少/禁用的 skill 不做处理（已注入内容留在历史里），保证前缀缓存稳定。
-SKILL_BANNER_MARK = "[上下文] 当前可用 skill"
-SKILL_UPDATE_MARK = "[上下文] 新增可用 skill"
+# 名单消息整体包在 <system-reminder> 里；首行固定，用于会话内去重与增量检测。
+SKILL_MARK = ("<system-reminder>A skill is a reusable set of task-specific instructions. "
+              "The following skills are available in this session:")
+SKILL_BLOCK_OPEN = "<available_skills>"
+SKILL_BLOCK_CLOSE = "</available_skills>"
+SKILL_CLOSE = "</system-reminder>"
+# 旧格式（历史会话里已注入过的标记），仅用于识别已声明过的 skill
+_LEGACY_MARKS = ("[上下文] 当前可用 skill", "[上下文] 新增可用 skill")
+_SKILL_LINE_RE = re.compile(r'^- `([^`]+)`: ')
 
 
 def _skill_lines(skills):
-    """skill 名单正文：name：description（空列表也占一行，避免空块歧义）。"""
-    return [f"- {name}：{desc}" for name, desc in sorted(skills.items())] or ["- (空)"]
+    """skill 名单正文：- `名称`: 说明（空列表也占一行，避免空块歧义）。"""
+    return [f"- `{name}`: {desc}" for name, desc in sorted(skills.items())] or ["- (空)"]
 
 
-def build_skill_banner(skills):
-    """构建首轮全量注入的 skill 名单消息（写入会话历史，此后不再重算）。"""
-    lines = [SKILL_BANNER_MARK + "（供调用 skill 工具时参考，不是用户请求）："]
+def build_skill_message(skills):
+    """构建注入的 skill 名单消息（首轮为全量，之后只含本次新增项）。"""
+    lines = [SKILL_MARK, SKILL_BLOCK_OPEN]
     lines.extend(_skill_lines(skills))
-    lines.append("完整 / 最新列表：调用 skill 工具并传 all=true。")
-    return "\n".join(lines)
-
-
-def build_skill_update(skills):
-    """构建增量注入的新增 skill 消息（只含本次新增项）。"""
-    lines = [SKILL_UPDATE_MARK + "（供调用 skill 工具时参考，不是用户请求）："]
-    lines.extend(_skill_lines(skills))
-    lines.append("完整 / 最新列表：调用 skill 工具并传 all=true。")
+    lines.extend([SKILL_BLOCK_CLOSE, "完整 / 最新列表：调用 skill 工具并传 all=true。", SKILL_CLOSE])
     return "\n".join(lines)
 
 
 def announced_skill_names(session_id):
-    """从会话内已注入的名单/增量消息里解析出已声明过的 skill 名。"""
+    """从会话内已注入的名单消息里解析出已声明过的 skill 名。"""
     names = set()
-    for content in db.load_injected_contents(session_id, (SKILL_BANNER_MARK, SKILL_UPDATE_MARK)):
+    prefixes = (SKILL_MARK,) + _LEGACY_MARKS
+    for content in db.load_injected_contents(session_id, prefixes):
         for line in content.splitlines():
-            m = re.match(r'^- ([^：]+)：', line)
+            m = _SKILL_LINE_RE.match(line)
             if m:
                 names.add(m.group(1).strip())
     return names
+
+
+def _has_skill_banner(session_id):
+    """会话内是否已注入过首轮全量名单（兼容旧格式）。"""
+    return (db.has_message_with_prefix(session_id, SKILL_MARK)
+            or db.has_message_with_prefix(session_id, _LEGACY_MARKS[0]))
 
 
 def inject_skill_delta(session_id):
@@ -277,13 +283,13 @@ def inject_skill_delta(session_id):
     减少（删除/禁用）的 skill 不处理：历史里已声明过的内容保留，模型仍可按名调用。
     """
     current = disclosed_skills()
-    if not db.has_message_with_prefix(session_id, SKILL_BANNER_MARK):
-        db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_banner(current)}])
+    if not _has_skill_banner(session_id):
+        db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_message(current)}])
         return
     announced = announced_skill_names(session_id)
     new_skills = {name: desc for name, desc in current.items() if name not in announced}
     if new_skills:
-        db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_update(new_skills)}])
+        db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_message(new_skills)}])
 
 
 def build_system_prompt():
