@@ -110,9 +110,10 @@ def run(arguments: dict) -> str | dict: ...
 
 `# status: enable | disable`（缺省 = `enable`）只控制**是否把该 skill 披露给模型**：
 
-- 披露位置：新建会话时一次性写入的首条上下文消息（`core/main.py:build_skill_banner`），
-  只列 `enable` 的 skill；消息随会话持久化，后续轮次原样复用。`skill` 工具 schema 与
-  系统提示词均保持静态，不随 skill 增删变化。
+- 披露位置：会话内的 skill 名单上下文消息（`core/main.py:build_skill_message`，
+  `<system-reminder>` + `<available_skills>` 包裹），只列 `enable` 的 skill；消息随会话
+  持久化，首轮全量、之后只增量追加新增项。`skill` 工具 schema 与系统提示词均保持静态，
+  不随 skill 增删变化。
 - 会话内新增 / 删除 / 改名 / 切换 status 都不会改写已注入名单（新会话才重新生成）；
   需要最新列表时调用 `skill(all=true)` 实时获取（该结果也是 `enable` 过滤后的实时值）。
 - **不影响执行逻辑**：`disable` 的 skill 仍在注册表 `REGISTRY` 中，按名称仍可

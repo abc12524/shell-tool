@@ -427,13 +427,13 @@ async def _async_main():
     # system prompt 固定在最前（跨轮一致，便于命中前缀缓存）
     system_prompt = build_system_prompt()
 
+    # 当前问题先入库（作为历史的一部分）：序号上位于 system 之后、skill 名单之前
+    db.append_messages(session_id, [{"role": "user", "content": question}])
+
     # 注入 skill 名单：首轮全量写入；之后每轮检测新增 skill 并增量追加入库。
     # 只追加不重算，因此会话中途安装新 skill 也不会改变已有前缀（缓存不失效）。
-    # 名单消息不进 OV 抓取，避免污染记忆。
+    # 名单消息排在用户消息之后、OV 注入之前；不进 OV 抓取，避免污染记忆。
     inject_skill_delta(session_id)
-
-    # 当前问题先入库（作为历史的一部分）
-    db.append_messages(session_id, [{"role": "user", "content": question}])
 
     # 抓取：把用户问题写入 OV session（config.OV_CAPTURE）
     if config.OV_CAPTURE:

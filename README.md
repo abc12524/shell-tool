@@ -56,7 +56,7 @@ def run(arguments: dict) -> str:
 模型侧只暴露一个 `skill` 工具：`all=true` 列出全部 skill，传 `skill=<名称>` 查看用法，
 传 `skill=<名称>` + `arguments={...}` 执行。未声明 `# skill:` 的脚本不会被注册。
 
-`# status: disable` 的 skill 不进入会话首条上下文中的 skill 名单（即不对 LLM 披露），
+`# status: disable` 的 skill 不进入会话上下文中的 skill 名单（即不对 LLM 披露），
 但仍可按名称查看用法 / 执行，执行逻辑不变。该名单只在新建会话时注入一次并持久化，
 `skill` 工具 schema 与系统提示词保持静态，因此会话内增删 skill 不会击穿前缀缓存。
 
