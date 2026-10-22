@@ -11,3 +11,5 @@ venv/
 data/
 # 技能本地配置（含密钥）不入库，仅 config.example.json
 skill/**/config.json
+# tplink_ptz 技能的设备凭据配置（本地生成，含账号密码）
+skill/**/tplink.conf
