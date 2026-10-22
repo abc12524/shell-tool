@@ -6,8 +6,6 @@ import re
 import sys
 from datetime import datetime, timezone
 
-from openai import AsyncOpenAI
-
 from . import config
 from . import db
 from . import llm
@@ -414,16 +412,7 @@ async def _async_main():
     if config.OV_CAPTURE:
         ov_session_id = openviking_ensure_session(session_id)
 
-    # 默认请求头：OpenCode Go 建议客户端以自有 UA 标识自己（非通用 SDK 名）
-    default_headers = {}
-    if config.LLM_USER_AGENT:
-        default_headers['User-Agent'] = config.LLM_USER_AGENT
-    client = AsyncOpenAI(
-        api_key=config.DEEPSEEK_API_KEY,
-        base_url=config.DEEPSEEK_BASE_URL,
-        default_headers=default_headers or None,
-    )
-
+    # 请求头（UA / 会话标识）在 core/llm.py 内按配置生成，无需在此构造客户端
     # system prompt 固定在最前（跨轮一致，便于命中前缀缓存）
     system_prompt = build_system_prompt()
 
@@ -464,7 +453,7 @@ async def _async_main():
 
     events.ev_question(question)
     full_content, full_reasoning, final_usage, assistant_msg, tool_results, new_history_msgs = \
-        await llm.chat_completion_with_tools(client, messages, session_id=session_id, ov_session_id=ov_session_id)
+        await llm.chat_completion_with_tools(messages, session_id=session_id, ov_session_id=ov_session_id)
 
     events.ev_session("saved", session_id)
     if config.OV_CAPTURE and ov_session_id:

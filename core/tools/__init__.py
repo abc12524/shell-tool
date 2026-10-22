@@ -11,7 +11,7 @@ import re
 from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
 from .skill_tool import skill_tool
-from .skill_hub import skill_hub
+from .skill_hub import skill_hub, source_label as _hub_source
 from .. import config
 from .. import events
 
@@ -94,7 +94,7 @@ TOOLS = [
             "name": "skill_hub",
             "description": (
                 "从远程技能仓库（GitHub / Gitea）查看 / 下载 / 卸载 skill，"
-                f"默认仓库 {config.SKILL_HUB_REPO}@{config.SKILL_HUB_BRANCH}。"
+                f"默认仓库 {_hub_source()}。"
                 "action='list' 列出远程可装技能（含平台/依赖）；"
                 "action='install' 并传 name 下载安装到本地 skill/；"
                 "action='remove' 并传 name 卸载。下载即信任其代码（会在进程内执行）。"
@@ -193,10 +193,12 @@ async def _execute_single_tool(tool_call):
     events.ev_tool_call(function_name, arguments=arguments, call_id=call_id)
 
     # 执行对应函数（同步阻塞函数放到线程池，不阻塞事件循环）
+    # 用 run_in_executor 而非 asyncio.to_thread（后者 3.9+），保证 Python 3.8 可用
     handler = TOOL_FUNCTIONS.get(function_name)
     if handler:
         try:
-            result_str = await asyncio.to_thread(handler, arguments)
+            loop = asyncio.get_running_loop()
+            result_str = await loop.run_in_executor(None, handler, arguments)
         except Exception as e:
             result_str = f"Error: 工具 {function_name} 执行失败 - {str(e)}"
     else:

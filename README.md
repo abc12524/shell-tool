@@ -2,6 +2,8 @@
 
 基于 DeepSeek 的流式命令行 AI 助手：支持系统命令执行、脚本编辑、OpenViking 记忆注入与抓取，对话记录持久化到 MySQL（可切换本地 SQLite），并提供 HTTP API 服务（含 SSE 流式输出）。
 
+LLM 接入层只用 `requests` 直接发 HTTP 并自行解析 SSE，**不依赖 openai SDK**，同时支持 DeepSeek 官方 Responses API 与 OpenAI 兼容 Chat Completions 两条协议；最低支持 **Python 3.8**。
+
 ## 功能特性
 
 - **系统命令执行** — 跨平台执行 Linux/macOS (bash) 与 Windows (PowerShell/CMD) 命令
@@ -11,7 +13,7 @@
 - **对话持久化** — 先落本地 SQLite（唯一读写源），再幂等同步到在线 MySQL，支持继续/新建/指定会话
 - **OpenViking 记忆注入 / 抓取** — 每轮对话前自动检索相关记忆并注入上下文，可将对话写入 OV session 并提交提取记忆
 - **流式输出** — 展示思考过程（reasoning）与最终回答
-- **多协议接入** — 除 DeepSeek 官方 Responses API 外，支持 OpenAI 兼容 Chat Completions 网关（OpenCode Zen / OpenCode Go，含 `deepseek-v4.1-flash` 等模型）
+- **多协议接入** — DeepSeek 官方 Responses API（支持服务端内置 `web_search`）与 OpenAI 兼容 Chat Completions 网关（OpenCode Zen / OpenCode Go，含 `deepseek-v4.1-flash` 等模型），两条协议均基于 `requests` 实现，无需 openai SDK
 - **HTTP API** — 提供 `/chat`（同步）与 `/chat/stream`（SSE 流式）接口
 
 ## 目录结构
@@ -89,8 +91,10 @@ SKILL_HUB_BRANCH=main
 ```bash
 git clone git@github.com:abc12524/shell-tool.git
 cd shell-tool
-pip install -r requirements.txt   # openai, requests, pymysql, flask, python-dotenv
+pip install -r requirements.txt   # requests, pymysql, flask, python-dotenv, rich
 ```
+
+运行要求：**Python 3.8+**，无需 openai SDK（接入层是原生 `requests`）。
 
 复制环境变量模板并填写配置：
 
@@ -108,7 +112,7 @@ cp .env.example .env
 | `DEEPSEEK_API_TYPE` | 接入协议：`responses`=DeepSeek 官方 Responses API（默认）；`chat`=OpenAI 兼容 Chat Completions（OpenCode 等网关） |
 | `LLM_PROVIDER` | 服务商（决定计费/峰谷/余额）：`deepseek` / `opencode-go`；留空按 `DEEPSEEK_BASE_URL` 自动推断 |
 | `LLM_SESSION_HEADER` | 会话标识请求头名：OpenCode Go 建议 `x-opencode-session`；留空时 OpenCode 系自动启用 |
-| `LLM_USER_AGENT` | 客户端 User-Agent 标识（OpenCode Go 建议用自有客户端名）；留空用 SDK 默认 |
+| `LLM_USER_AGENT` | 客户端 User-Agent 标识（OpenCode Go 建议用自有客户端名）；留空则不发该请求头 |
 | `MAX_TOOL_ROUNDS` | 工具调用最大轮数（默认 6） |
 | `LLM_WEB_SEARCH` | LLM 内置联网搜索（DeepSeek Responses API 自带 web_search）开关：`false`=关闭（默认），`true`=开启 |
 | `DB_ONLINE` | 在线 MySQL 同步开关：`true`=开启同步（默认 true；未配置或连接失败则仅用 SQLite），`false`=关闭 |

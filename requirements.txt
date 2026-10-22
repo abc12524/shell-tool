@@ -1,6 +1,5 @@
-openai>=1.66
 requests
 pymysql
 flask
 python-dotenv
-rich>=13.0
+rich>=13.0,<13.9

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """全局 Rich Console 实例，供各模块统一使用"""
+from __future__ import annotations
+
 import json
 import os
 import sys
