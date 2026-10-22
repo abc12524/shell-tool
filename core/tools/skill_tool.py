@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """skill 注册表：扫描 skill/ 目录，按脚本头部的标准结构自动注册为可执行 skill。
 
-支持两种布局（可混用）：
-    扁平：  skill/<名称>.py              → 模块 skill.<名称>
-    文件夹：skill/<名称>/skill.py        → 模块 skill.<名称>.skill（配置/助手模块同目录）
+支持文件夹布局：
+    skill/<名称>/skill.py   → 模块 skill.<名称>.skill（配置/助手模块同目录）
 
 脚本头部规范（文件最前面连续的 # 注释行）：
     # skill: <名称>
@@ -102,7 +101,6 @@ def _parse_skill_header(path):
         "status": status,
         "usage": "\n".join(usage_lines).strip(),
         "path": path,
-        "module": "skill." + os.path.splitext(os.path.basename(path))[0],
     }
 
 
@@ -165,9 +163,9 @@ def _meta_to_cache(meta):
 def _iter_entries():
     """枚举 skill 条目，产出 (key, path, module)。
 
-    - 扁平：  skill/<名称>.py       → key=<名称>.py       module=skill.<名称>
-    - 文件夹：skill/<名称>/skill.py → key=<名称>/skill.py module=skill.<名称>.skill
-    以 `_` 或 `.` 开头的文件/目录一律跳过（助手模块 / 隐藏目录）。
+    skill/<名称>/skill.py → key=<名称>/skill.py module=skill.<名称>.skill
+    以 `_` 或 `.` 开头的文件/目录一律跳过（助手模块 / 隐藏目录）；根目录下散落的
+    .py 文件不参与注册。
     """
     if not os.path.isdir(SKILL_DIR):
         return
@@ -175,12 +173,11 @@ def _iter_entries():
         if fn.startswith("_") or fn.startswith("."):
             continue
         full = os.path.join(SKILL_DIR, fn)
-        if os.path.isfile(full) and fn.endswith(".py"):
-            yield fn, full, "skill." + os.path.splitext(fn)[0]
-        elif os.path.isdir(full):
-            entry = os.path.join(full, "skill.py")
-            if os.path.isfile(entry):
-                yield fn + "/skill.py", entry, "skill." + fn + ".skill"
+        if not os.path.isdir(full):
+            continue
+        entry = os.path.join(full, "skill.py")
+        if os.path.isfile(entry):
+            yield fn + "/skill.py", entry, "skill." + fn + ".skill"
 
 
 def _scan():

@@ -92,9 +92,8 @@ def fetch_index():
 
 
 def _local_installed(name):
-    """本地是否已安装（文件夹或扁平文件）。"""
-    return (os.path.isfile(os.path.join(SKILL_DIR, name + ".py"))
-            or os.path.isdir(os.path.join(SKILL_DIR, name)))
+    """本地是否已安装（skill/ 下的同名文件夹）。"""
+    return os.path.isdir(os.path.join(SKILL_DIR, name))
 
 
 def remote_skills():
@@ -306,13 +305,13 @@ def install(name):
 
 
 def remove(name):
-    """卸载文件夹式 skill（不删除扁平 .py），返回结果 dict。"""
+    """卸载已安装的 skill（删除 skill/ 下的同名文件夹），返回结果 dict。"""
     name = (name or "").strip()
     if not _NAME_RE.match(name):
         raise RuntimeError(f"非法 skill 名 '{name}'")
     dest_dir = os.path.join(SKILL_DIR, name)
     if not os.path.isdir(dest_dir):
-        raise RuntimeError(f"未安装文件夹式 skill '{name}'")
+        raise RuntimeError(f"未安装 skill '{name}'")
     shutil.rmtree(dest_dir)
     reload_registry()
     return {"name": name, "removed": True}
@@ -323,7 +322,7 @@ def skill_hub(action: str = "list", name: str = ""):
 
     - action="list"           → 列出远程仓库全部技能（标注是否已安装）
     - action="install", name  → 下载并安装指定技能到本地 skill/
-    - action="remove",  name  → 卸载本地文件夹式技能
+    - action="remove",  name  → 卸载本地技能（删除 skill/ 下同名文件夹）
     """
     act = (action or "list").strip().lower()
     try:
