@@ -631,6 +631,18 @@ def build_assistant_msg(content, reasoning, tool_calls_list, output_items=None):
     return msg
 
 
+def _reminder(tag, text):
+    """把运行时注入内容统一包进 <system-reminder><tag>…</tag></system-reminder>。"""
+    return f"<system-reminder>\n<{tag}>\n{text}\n</{tag}>\n</system-reminder>"
+
+
+# 工具轮预算耗尽时注入给模型的强制收尾提示
+FORCE_FINAL_WARNING = _reminder(
+    "user_warning",
+    "本轮已达到工具调用次数上限，请不要再调用工具，直接基于已有信息给出最终回答。",
+)
+
+
 def _persist(session_id, ov_session_id, msgs):
     """统一持久化出口：写本地库 + 同步 OV 会话，保证每条消息只落一次。
 
@@ -718,11 +730,12 @@ async def chat_completion_with_tools(messages, session_id=None, ov_session_id=No
     # ---- 预算耗尽但仍想调工具 → 强制给出最终回答 ----
     if forced_final:
         force_msg = {
-            "role": "user",
-            "content": "已达到工具调用次数上限，请不要再调用工具，直接基于已有信息给出最终回答。"
+            "role": db.INSERT_USER_ROLE,
+            "content": FORCE_FINAL_WARNING,
         }
         events.ev_warning("工具调用次数已达上限，强制基于已有结果给出最终回答", code="max_tool_rounds")
         messages.append(force_msg)
+        _persist(session_id, ov_session_id, [force_msg])
         # 由 config.OV_INJECT 控制（step/both 时启用）
         if config.OV_INJECT in ('step', 'both'):
             step_recall = openviking_load_context(messages, session_id=session_id)

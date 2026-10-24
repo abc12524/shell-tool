@@ -249,6 +249,10 @@ USER_TIPS_OPEN = "<user_tips>"
 USER_TIPS_CLOSE = "</user_tips>"
 USER_TIPS_MARK = "<system-reminder>\n<user_tips>"
 
+# 轮次提示：每个用户问题之后注入一次，收在 <system-reminder> 内。
+USER_TURN_OPEN = "<user_turn>"
+USER_TURN_CLOSE = "</user_turn>"
+
 
 def _skill_lines(skills):
     """skill 名单正文：- `名称`: 说明（空列表也占一行，避免空块歧义）。"""
@@ -294,6 +298,17 @@ def inject_skill_delta(session_id):
     new_skills = {name: desc for name, desc in current.items() if name not in announced}
     if new_skills:
         db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_message(new_skills)}])
+
+
+def build_user_turn_message(turn_no):
+    """构建轮次提示消息（当前是会话内第几轮用户对话）。"""
+    return "\n".join(["<system-reminder>", USER_TURN_OPEN,
+                      f"这是第 {turn_no} 轮对话。", USER_TURN_CLOSE, SKILL_CLOSE])
+
+
+def inject_user_turn(session_id, turn_no):
+    """每轮用户问题之后注入一次轮次提示并入库。"""
+    db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_user_turn_message(turn_no)}])
 
 
 def build_user_tips_message(tips):
@@ -436,8 +451,10 @@ async def _async_main():
     # system prompt 固定在最前（跨轮一致，便于命中前缀缓存）
     system_prompt = build_system_prompt()
 
-    # 当前问题先入库（作为历史的一部分）：序号上位于 system 之后、skill 名单之前
+    # 当前问题先入库（作为历史的一部分）：序号上位于 system 之后、注入块之前
+    turn_no = db.count_user_turns(session_id) + 1
     db.append_messages(session_id, [{"role": "user", "content": question}])
+    inject_user_turn(session_id, turn_no)
 
     # 注入 skill 名单：首轮全量写入；之后每轮检测新增 skill 并增量追加入库。
     # 只追加不重算，因此会话中途安装新 skill 也不会改变已有前缀（缓存不失效）。

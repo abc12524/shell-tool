@@ -307,6 +307,15 @@ def count_messages(session_id):
     return row['n']
 
 
+def count_user_turns(session_id):
+    """统计会话内真实用户提问条数（不含 insert_user 合成注入），用于轮次提示。"""
+    with _sqlite_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM chat_messages WHERE session_id=? AND role='user'",
+            (session_id,)).fetchone()
+    return row['n']
+
+
 def list_recent_sessions(limit=5):
     """列出最近活动的会话（含消息条数），用于 -s 查看"""
     with _sqlite_conn() as conn:
