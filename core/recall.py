@@ -200,13 +200,18 @@ def build_recall_query(messages):
     return '\n'.join(t for t in (_msg_query_text(m) for m in (messages or [])) if t).strip()
 
 
+def openviking_block(content: str) -> str:
+    """只包 <available_openviking>，供合并进统一 system-reminder 时使用。"""
+    if not content:
+        return ""
+    return f"{OV_BLOCK_OPEN}\n{content}\n{OV_BLOCK_CLOSE}"
+
+
 def wrap_openviking_block(content: str) -> str:
     """把 OpenViking 注入内容统一包进 <system-reminder><available_openviking>。"""
     if not content:
         return ""
-    return (f"{REMINDER_OPEN}\n{OV_BLOCK_OPEN}\n"
-            f"{content}\n"
-            f"{OV_BLOCK_CLOSE}\n{REMINDER_CLOSE}")
+    return f"{REMINDER_OPEN}\n{openviking_block(content)}\n{REMINDER_CLOSE}"
 
 
 def wrap_recall_block(block: str) -> str:

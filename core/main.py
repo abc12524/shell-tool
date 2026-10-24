@@ -21,8 +21,7 @@ from .recall import (
     openviking_ensure_session,
     openviking_capture,
     openviking_commit_session,
-    wrap_openviking_block,
-    wrap_recall_block,
+    openviking_block,
 )
 
 USAGE = """使用方法：python dp.py [选项] [问题]
@@ -232,26 +231,31 @@ def print_recent_sessions(limit=5):
     console.print("继续会话：python dp.py -s <id> \"你的问题\"", style="dim")
 
 
-# 会话级 skill 名单：首轮全量注入；之后每轮重新检测，只增量注入新增的 skill。
-# 减少/禁用的 skill 不做处理（已注入内容留在历史里），保证前缀缓存稳定。
-# 名单消息整体包在 <system-reminder> 里；首行固定，用于会话内去重与增量检测。
-SKILL_MARK = ("<system-reminder>A skill is a reusable set of task-specific instructions. "
+# 每轮上下文注入：user_turn / skill 名单 / OV / user_tips 合并为一条
+# <system-reminder> 消息。skill 名单首轮全量，之后只补新增项；减少/禁用不处理，
+# 保证已发送前缀稳定。
+SKILL_HINT = ("A skill is a reusable set of task-specific instructions. "
               "The following skills are available in this session:")
 SKILL_BLOCK_OPEN = "<available_skills>"
 SKILL_BLOCK_CLOSE = "</available_skills>"
+REMINDER_OPEN = "<system-reminder>"
 SKILL_CLOSE = "</system-reminder>"
 # 旧格式（历史会话里已注入过的标记），仅用于识别已声明过的 skill
 _LEGACY_MARKS = ("[上下文] 当前可用 skill", "[上下文] 新增可用 skill")
 _SKILL_LINE_RE = re.compile(r'^- `([^`]+)`: ')
 
-# 用户自定义提示（.env: user_tips）：每会话只注入一次，同样收在 <system-reminder> 内。
+# 用户自定义提示（.env: user_tips）：每会话只注入一次。
 USER_TIPS_OPEN = "<user_tips>"
 USER_TIPS_CLOSE = "</user_tips>"
-USER_TIPS_MARK = "<system-reminder>\n<user_tips>"
 
-# 轮次提示：每个用户问题之后注入一次，收在 <system-reminder> 内。
+# 轮次提示：每个用户问题之后注入一次。
 USER_TURN_OPEN = "<user_turn>"
 USER_TURN_CLOSE = "</user_turn>"
+
+
+def _injected_contents(session_id):
+    """会话内全部注入消息内容（新格式统一以 <system-reminder> 开头，兼容旧格式）。"""
+    return db.load_injected_contents(session_id, (REMINDER_OPEN,) + _LEGACY_MARKS)
 
 
 def _skill_lines(skills):
@@ -259,20 +263,25 @@ def _skill_lines(skills):
     return [f"- `{name}`: {desc}" for name, desc in sorted(skills.items())] or ["- (空)"]
 
 
-def build_skill_message(skills):
-    """构建注入的 skill 名单消息（首轮为全量，之后只含本次新增项）。"""
-    lines = [SKILL_MARK, SKILL_BLOCK_OPEN]
+def build_skill_block(skills):
+    """skill 名单块（不含 system-reminder，由本轮统一包裹）。"""
+    lines = [SKILL_HINT, SKILL_BLOCK_OPEN]
     lines.extend(_skill_lines(skills))
-    lines.extend([SKILL_BLOCK_CLOSE, "完整 / 最新列表：调用 skill 工具并传 all=true。", SKILL_CLOSE])
+    lines.extend([SKILL_BLOCK_CLOSE, "完整 / 最新列表：调用 skill 工具并传 all=true。"])
     return "\n".join(lines)
 
 
 def announced_skill_names(session_id):
-    """从会话内已注入的名单消息里解析出已声明过的 skill 名。"""
+    """从会话内已注入的名单块里解析出已声明过的 skill 名。"""
     names = set()
-    prefixes = (SKILL_MARK,) + _LEGACY_MARKS
-    for content in db.load_injected_contents(session_id, prefixes):
-        for line in content.splitlines():
+    for content in _injected_contents(session_id):
+        if SKILL_BLOCK_OPEN in content:
+            segment = content.split(SKILL_BLOCK_OPEN, 1)[1].split(SKILL_BLOCK_CLOSE, 1)[0]
+        elif content.startswith(_LEGACY_MARKS):
+            segment = content
+        else:
+            continue
+        for line in segment.splitlines():
             m = _SKILL_LINE_RE.match(line)
             if m:
                 names.add(m.group(1).strip())
@@ -280,49 +289,39 @@ def announced_skill_names(session_id):
 
 
 def _has_skill_banner(session_id):
-    """会话内是否已注入过首轮全量名单（兼容旧格式）。"""
-    return (db.has_message_with_prefix(session_id, SKILL_MARK)
-            or db.has_message_with_prefix(session_id, _LEGACY_MARKS[0]))
+    """会话内是否已注入过 skill 名单（兼容旧格式的两种标记）。"""
+    if any(SKILL_BLOCK_OPEN in c for c in _injected_contents(session_id)):
+        return True
+    return any(db.has_message_with_prefix(session_id, mark) for mark in _LEGACY_MARKS)
 
 
-def inject_skill_delta(session_id):
-    """首轮写全量名单；之后每轮检测当前 skill，只把新增项增量写入。
-
-    减少（删除/禁用）的 skill 不处理：历史里已声明过的内容保留，模型仍可按名调用。
-    """
+def take_skill_block(session_id):
+    """首轮返回全量名单块；之后仅在有新增 skill 时返回增量块，否则 None。"""
     current = disclosed_skills()
     if not _has_skill_banner(session_id):
-        db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_message(current)}])
-        return
+        return build_skill_block(current)
     announced = announced_skill_names(session_id)
     new_skills = {name: desc for name, desc in current.items() if name not in announced}
-    if new_skills:
-        db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_message(new_skills)}])
+    return build_skill_block(new_skills) if new_skills else None
 
 
-def build_user_turn_message(turn_no):
-    """构建轮次提示消息（当前是会话内第几轮用户对话）。"""
-    return "\n".join(["<system-reminder>", USER_TURN_OPEN,
-                      f"这是第 {turn_no} 轮对话。", USER_TURN_CLOSE, SKILL_CLOSE])
+def build_user_turn_block(turn_no):
+    return f"{USER_TURN_OPEN}\n这是第 {turn_no} 轮对话。\n{USER_TURN_CLOSE}"
 
 
-def inject_user_turn(session_id, turn_no):
-    """每轮用户问题之后注入一次轮次提示并入库。"""
-    db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_user_turn_message(turn_no)}])
-
-
-def build_user_tips_message(tips):
-    """构建用户自定义提示消息（.env 的 user_tips，收在 system-reminder 内）。"""
-    return "\n".join(["<system-reminder>", USER_TIPS_OPEN, tips.strip(),
-                      USER_TIPS_CLOSE, SKILL_CLOSE])
-
-
-def inject_user_tips(session_id):
-    """每会话只注入一次 user_tips，内容变化不影响已有会话（保持前缀缓存稳定）。"""
+def take_user_tips_block(session_id):
+    """每会话只取一次 user_tips；已注入过则返回 None。"""
     tips = (config.USER_TIPS or '').strip()
-    if not tips or db.has_message_with_prefix(session_id, USER_TIPS_MARK):
-        return
-    db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_user_tips_message(tips)}])
+    if not tips or any(USER_TIPS_OPEN in c for c in _injected_contents(session_id)):
+        return None
+    return f"{USER_TIPS_OPEN}\n{tips}\n{USER_TIPS_CLOSE}"
+
+
+def inject_turn_context(session_id, turn_no, blocks):
+    """把本轮所有注入块合并成一条 <system-reminder> 消息写入。"""
+    parts = [build_user_turn_block(turn_no)] + [b for b in blocks if b]
+    content = "\n".join([REMINDER_OPEN] + parts + [SKILL_CLOSE])
+    db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": content}])
 
 
 def build_system_prompt():
@@ -451,41 +450,34 @@ async def _async_main():
     # system prompt 固定在最前（跨轮一致，便于命中前缀缓存）
     system_prompt = build_system_prompt()
 
-    # 当前问题先入库（作为历史的一部分）：序号上位于 system 之后、注入块之前
+    # 当前问题入库（作为历史的一部分）后，收集本轮所有注入块，最后合并成一条消息。
     turn_no = db.count_user_turns(session_id) + 1
     db.append_messages(session_id, [{"role": "user", "content": question}])
-    inject_user_turn(session_id, turn_no)
 
-    # 注入 skill 名单：首轮全量写入；之后每轮检测新增 skill 并增量追加入库。
-    # 只追加不重算，因此会话中途安装新 skill 也不会改变已有前缀（缓存不失效）。
-    # 名单消息排在用户消息之后、OV 注入之前；不进 OV 抓取，避免污染记忆。
-    inject_skill_delta(session_id)
+    blocks = [take_skill_block(session_id)]
 
     # 抓取：把用户问题写入 OV session（config.OV_CAPTURE）
     if config.OV_CAPTURE:
         openviking_capture(ov_session_id, [{"role": "user", "content": question}])
 
-    # 注入 profile：会话开始注入可用记忆索引（config.OV_PROFILE，仅新建会话；
-    # 入库位置固定在问题之后，保证前缀缓存稳定）
+    # profile：会话开始注入可用记忆索引（config.OV_PROFILE，仅新建会话）
     if config.OV_PROFILE and is_new:
         profile_ctx = openviking_load_profile()
         events.ev_memory("profile", bool(profile_ctx))
         if profile_ctx:
-            profile_msg = {"role": db.INSERT_USER_ROLE, "content": wrap_openviking_block(profile_ctx)}
-            db.append_messages(session_id, [profile_msg])
-            if config.OV_CAPTURE:
-                openviking_capture(ov_session_id, [profile_msg])
+            blocks.append(openviking_block(profile_ctx))
 
-    # 注入 question：每轮以用户问题为 query 检索相关记忆并注入（config.OV_INJECT
-    # 含 question/both；入库位置固定在问题之后，保证前缀缓存稳定）
+    # question 召回：每轮以用户问题为 query 检索相关记忆（config.OV_INJECT 含 question/both）
     if config.OV_INJECT in ('question', 'both'):
         mem_context = openviking_load_context([{"role": "user", "content": question}], session_id=session_id)
         events.ev_memory("recall", bool(mem_context))
         if mem_context:
-            db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": wrap_recall_block(mem_context)}])
+            blocks.append(openviking_block(mem_context))
 
-    # 注入 user_tips：.env 可自定义，每会话只写一次（问题之后集中注入的最后一块）
-    inject_user_tips(session_id)
+    blocks.append(take_user_tips_block(session_id))
+
+    # user_turn / skill 名单 / OV / user_tips 合并为同一条 <system-reminder> 消息入库
+    inject_turn_context(session_id, turn_no, blocks)
 
     # 加载历史（含各问题及其后注入）作为完整消息序列
     stored = db.load_messages(session_id)
