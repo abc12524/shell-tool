@@ -66,6 +66,11 @@ LLM_WEB_SEARCH = os.environ.get('LLM_WEB_SEARCH', 'false') in ('1', 'true', 'Tru
 # 打印每轮发送给 API 的消息序列 hash（role:md5），默认关闭
 DEBUG_SEND_SEQ = os.environ.get('DEBUG_SEND_SEQ', '0') in ('1', 'true', 'True')
 
+# ===== 用户自定义提示 =====
+# .env 变量名 user_tips：每会话注入一次，包在 <system-reminder><user_tips> 内。
+# 双引号包裹可用 \n 表示换行（python-dotenv 会解析）。
+USER_TIPS = (os.environ.get('user_tips') or os.environ.get('USER_TIPS') or '').strip()
+
 # ===== OpenViking 记忆检索 =====
 # find 接口（纯向量语义搜索）：默认阈值 0.4，默认返回 3 条。
 # 自动注入（openviking_load_context）也使用 find 接口，故复用本组配置。

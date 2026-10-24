@@ -21,6 +21,7 @@ from .recall import (
     openviking_ensure_session,
     openviking_capture,
     openviking_commit_session,
+    wrap_openviking_block,
     wrap_recall_block,
 )
 
@@ -243,6 +244,11 @@ SKILL_CLOSE = "</system-reminder>"
 _LEGACY_MARKS = ("[上下文] 当前可用 skill", "[上下文] 新增可用 skill")
 _SKILL_LINE_RE = re.compile(r'^- `([^`]+)`: ')
 
+# 用户自定义提示（.env: user_tips）：每会话只注入一次，同样收在 <system-reminder> 内。
+USER_TIPS_OPEN = "<user_tips>"
+USER_TIPS_CLOSE = "</user_tips>"
+USER_TIPS_MARK = "<system-reminder>\n<user_tips>"
+
 
 def _skill_lines(skills):
     """skill 名单正文：- `名称`: 说明（空列表也占一行，避免空块歧义）。"""
@@ -288,6 +294,20 @@ def inject_skill_delta(session_id):
     new_skills = {name: desc for name, desc in current.items() if name not in announced}
     if new_skills:
         db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_skill_message(new_skills)}])
+
+
+def build_user_tips_message(tips):
+    """构建用户自定义提示消息（.env 的 user_tips，收在 system-reminder 内）。"""
+    return "\n".join(["<system-reminder>", USER_TIPS_OPEN, tips.strip(),
+                      USER_TIPS_CLOSE, SKILL_CLOSE])
+
+
+def inject_user_tips(session_id):
+    """每会话只注入一次 user_tips，内容变化不影响已有会话（保持前缀缓存稳定）。"""
+    tips = (config.USER_TIPS or '').strip()
+    if not tips or db.has_message_with_prefix(session_id, USER_TIPS_MARK):
+        return
+    db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": build_user_tips_message(tips)}])
 
 
 def build_system_prompt():
@@ -434,7 +454,7 @@ async def _async_main():
         profile_ctx = openviking_load_profile()
         events.ev_memory("profile", bool(profile_ctx))
         if profile_ctx:
-            profile_msg = {"role": db.INSERT_USER_ROLE, "content": profile_ctx}
+            profile_msg = {"role": db.INSERT_USER_ROLE, "content": wrap_openviking_block(profile_ctx)}
             db.append_messages(session_id, [profile_msg])
             if config.OV_CAPTURE:
                 openviking_capture(ov_session_id, [profile_msg])
@@ -446,6 +466,9 @@ async def _async_main():
         events.ev_memory("recall", bool(mem_context))
         if mem_context:
             db.append_messages(session_id, [{"role": db.INSERT_USER_ROLE, "content": wrap_recall_block(mem_context)}])
+
+    # 注入 user_tips：.env 可自定义，每会话只写一次（问题之后集中注入的最后一块）
+    inject_user_tips(session_id)
 
     # 加载历史（含各问题及其后注入）作为完整消息序列
     stored = db.load_messages(session_id)

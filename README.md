@@ -119,6 +119,7 @@ cp .env.example .env
 | `SQLITE_DB_PATH` | 本地 SQLite 文件路径（唯一读写源，默认 `data/shell_tool.db`） |
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | 在线 MySQL（同步副本）连接信息 |
 | `OPENVIKING_URL/KEY/USER` | OpenViking 外置记忆服务 |
+| `user_tips` | 用户自定义提示，每会话注入一次（包在 `<system-reminder><user_tips>` 内）；双引号内可用 `\n` 换行 |
 
 ### 接入 OpenCode Go（deepseek-v4.1-flash）
 
