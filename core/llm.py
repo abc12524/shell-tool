@@ -733,7 +733,8 @@ async def chat_completion_with_tools(messages, session_id=None, ov_session_id=No
             "role": db.INSERT_USER_ROLE,
             "content": FORCE_FINAL_WARNING,
         }
-        events.ev_warning("工具调用次数已达上限，强制基于已有结果给出最终回答", code="max_tool_rounds")
+        events.ev_warning("工具调用次数已达上限，强制基于已有结果给出最终回答",
+                          code="max_tool_rounds", silent=True)
         messages.append(force_msg)
         _persist(session_id, ov_session_id, [force_msg])
         # 由 config.OV_INJECT 控制（step/both 时启用）

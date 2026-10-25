@@ -126,14 +126,15 @@ def ev_search(state, call_id=None, first=False):
     _ev("search", {"state": state, "id": call_id, "first": bool(first)}, t)
 
 
-def ev_warning(message, code=None):
+def ev_warning(message, code=None, silent=False):
+    """silent=True 时仅在 API 模式发事件，终端不打印。"""
     payload = {"message": message}
     if code:
         payload["code"] = code
 
     def t():
         console.print(f"⚠️  {message}", style="bold red")
-    _ev("warning", payload, t)
+    _ev("warning", payload, None if silent else t)
 
 
 def ev_usage(model, peak, hit, miss, out, costs, total, balance, currency):
