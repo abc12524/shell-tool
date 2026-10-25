@@ -55,6 +55,32 @@ def build_args(data):
     return args
 
 
+def build_env(data):
+    """构造子进程环境变量。
+
+    除统一的 UTF-8 / API 模式外，还透传通道上下文：
+      tips    → USER_TIPS           让模型知道「这条消息来自 QQ，须用 qq_reply 回复」
+      openid  → QQ_CURRENT_OPENID   qq_reply 据此决定接收人（不接受参数指定，防越权）
+
+    注意 core/config.py 的 load_dotenv 默认 override=False，所以这里的值优先级
+    高于 .env 里的同名项，CLI 场景（不传 tips）则完全不受影响。
+    """
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    # Windows 管道默认 locale(GBK) 编码会使 Rich 中文/边框乱码，统一 UTF-8
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    # 告知子进程：stdout 会被当作模型正文转发，诊断输出请走 stderr
+    env["DP_API_MODE"] = "1"
+    tips = data.get("tips")
+    if tips:
+        env["USER_TIPS"] = str(tips)
+    openid = data.get("openid")
+    if openid:
+        env["QQ_CURRENT_OPENID"] = str(openid)
+    return env
+
+
 def _sse(event_type, **fields):
     """构造一个 SSE 事件块（data: <json>\\n\\n）"""
     payload = {"type": event_type}
@@ -126,24 +152,21 @@ def _reap(process):
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True)
-    if not data or "question" not in data:
+    if not data:
         return jsonify({"status": "error", "error": "请提供 question 参数", "code": "bad_request"}), 400
 
-    question = data["question"]
-    if not question.strip():
+    # question 允许为空，但仅限 new=true：用于"只开新会话、不对话"（对应 dp.py -n 无问题）
+    question = (data.get("question") or "").strip()
+    if not question and not data.get("new"):
         return jsonify({"status": "error", "error": "question 不能为空", "code": "bad_request"}), 400
 
     args = build_args(data)
-    cmd = [PYTHON, DEEPSEEK_PATH] + args + [question]
+    cmd = [PYTHON, DEEPSEEK_PATH] + args + ([question] if question else [])
 
     try:
         # 强制子进程以 UTF-8 输出：Windows 下管道默认 locale 编码(GBK)，
         # 会让 Rich 边框/中文乱码；这里统一按 UTF-8 编码与解码。
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        env["DP_API_MODE"] = "1"
+        env = build_env(data)
         result = subprocess.run(
             cmd, capture_output=True, timeout=120,
             cwd=os.path.dirname(DEEPSEEK_PATH),
@@ -168,24 +191,19 @@ def chat():
 @app.route("/chat/stream", methods=["POST"])
 def chat_stream():
     data = request.get_json(silent=True)
-    if not data or "question" not in data:
+    if not data:
         return jsonify({"status": "error", "error": "请提供 question 参数", "code": "bad_request"}), 400
 
-    question = data["question"]
-    if not question.strip():
+    # question 允许为空，但仅限 new=true：用于"只开新会话、不对话"（对应 dp.py -n 无问题）
+    question = (data.get("question") or "").strip()
+    if not question and not data.get("new"):
         return jsonify({"status": "error", "error": "question 不能为空", "code": "bad_request"}), 400
 
     args = build_args(data)
 
     def generate():
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        # Windows 管道默认 locale(GBK) 编码会使 Rich 中文/边框乱码，统一 UTF-8
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        # 告知子进程：stdout 会被当作模型正文转发，诊断输出请走 stderr
-        env["DP_API_MODE"] = "1"
-        cmd = [PYTHON, DEEPSEEK_PATH] + args + [question]
+        env = build_env(data)
+        cmd = [PYTHON, DEEPSEEK_PATH] + args + ([question] if question else [])
 
         # start_new_session：让子进程成为独立进程组 leader，断开时能干净回收
         process = subprocess.Popen(

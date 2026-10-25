@@ -11,7 +11,7 @@ from . import db
 from . import llm
 from . import billing
 from . import events
-from .console import console, render_table
+from .console import console, render_table, _API_MODE
 from .tools import get_system_info
 from .tools.skill_tool import disclosed_skills, set_status, skills_overview
 from .tools.skill_hub import remote_skills, install as hub_install, remove as hub_remove, source_label as hub_source
@@ -27,7 +27,7 @@ from .recall import (
 USAGE = """使用方法：python dp.py [选项] [问题]
 
   直接加问题   → 默认同一对话（复用最近的活跃会话）
-  -n, --new    → 终结当前对话，并新开一个对话
+  -n, --new    → 终结当前对话，并新开一个对话（可只给 -n 不带问题：仅开新会话不开聊）
   -s, --session [id] → 不带 id：列出最近 5 条会话；带 id：继续指定会话（可指定历史会话）
   -S, --skill [名称] [enable|disable] → 不带参数：列出全部 skill 及 status；带参数：开关该 skill 的 status
   -I, --install [名称...] → 不带名称：列出远程可装 skill；带名称（可多个，空格分隔）：从远程仓库下载安装到本地 skill/
@@ -429,6 +429,15 @@ async def _async_main():
         sys.exit(0)
 
     if not question:
+        # -n 不带 question：只结算旧会话并开新会话，不进入对话流程。
+        # 供外部通道（如 qqbot 的 /new）即时开新会话——建好后不带 -n/-s 的
+        # 下一次调用会默认复用它（get_active_session_id 取最新 active）。
+        if new_flag:
+            session_id, is_new = resolve_session(new_flag, sid)
+            events.ev_session("new" if is_new else "resume", session_id)
+            if not _API_MODE:
+                print(f"✅ 已开启新会话：{session_id}")
+            sys.exit(0)
         print(USAGE)
         sys.exit(0)
 
