@@ -290,7 +290,13 @@ def chat_stream():
 
         t_out.join(timeout=2)
         t_err.join(timeout=2)
-        rc = process.poll()
+        # stdout 已 EOF 说明子进程基本结束，但进程本身可能还没被回收：
+        # 此时 poll() 会返回 None，导致崩溃被误判成正常结束（客户端只收到 done，
+        # 看不到 traceback）。先等它真正退出，超时再退回 poll() 的瞬时结果。
+        try:
+            rc = process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            rc = process.poll()
         err_text = "".join(stderr_buf).strip()
         if rc and rc != 0:
             err = err_text or f"进程退出码 {rc}"
