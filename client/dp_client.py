@@ -38,9 +38,11 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
@@ -71,6 +73,147 @@ def _normalize_newlines(text: str) -> str:
     Rich 的 Markdown 只认 LF 作块分隔，直接喂入 CRLF 会把多行挤成一行。
     """
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# ---- 工具框渲染（与 core/events.py 的终端样式保持一致）----
+# 浅灰描边、宽度自适应内容、JSON 缩进高亮、结果最多 15 行、写动作展示彩色 diff。
+_RESULT_MAX_LINES = 15
+_RESULT_MAX_CHARS = 1500
+_CALL_JSON_LIMIT = 1200
+_CALL_TEXT_LIMIT = 300
+_PANEL_BORDER = "grey50"
+
+
+def _clip_lines(text, limit=_RESULT_MAX_LINES, what=""):
+    """按行截断，返回 (正文, 说明)。截断时留一行给说明，保证框内不超过 limit 行。"""
+    lines = (text or "").splitlines()
+    if len(lines) <= limit:
+        return text or "", None
+    keep = max(0, limit - 1)
+    return "\n".join(lines[:keep]), f"… {what}已截断（共 {len(lines)} 行）"
+
+
+def _clip_chars(text, limit, what=""):
+    """按字符兜底截断（单行超长时用），返回 (正文, 说明)"""
+    text = text or ""
+    if len(text) <= limit:
+        return text, None
+    return text[:limit], f"… {what}已截断（共 {len(text)} 字符）"
+
+
+def _clipped(text, char_limit, max_lines=None, what=""):
+    """通用截断：先按行，再按字符；返回 (正文, 说明)"""
+    body, note = text or "", None
+    if max_lines:
+        body, note = _clip_lines(body, max_lines, what)
+    body, note2 = _clip_chars(body, char_limit, what)
+    return body, note or note2
+
+
+def _syntax_view(text):
+    """JSON 高亮；pygments 缺失时退化为纯文本"""
+    try:
+        return Syntax(text, "json", theme="ansi_dark", background_color="default", word_wrap=True)
+    except Exception:
+        return Text(text, style="cyan")
+
+
+def _json_view(value, char_limit, max_lines=None):
+    """dict/list → 缩进 2 的彩色 JSON（含截断说明）"""
+    try:
+        pretty = json.dumps(value, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        pretty = str(value)
+    body, note = _clipped(pretty, char_limit, max_lines)
+    parts = [_syntax_view(body)]
+    if note:
+        parts.append(Text(note, style="dim"))
+    return parts
+
+
+def _text_view(text, char_limit, max_lines=None):
+    """纯文本正文（含截断说明）"""
+    body, note = _clipped(text, char_limit, max_lines)
+    parts = [Text(body)]
+    if note:
+        parts.append(Text(note, style="dim"))
+    return parts
+
+
+def _payload_parts(text):
+    """结果正文：能解析成 JSON 就格式化高亮，否则纯文本；最多 15 行"""
+    text = (text or "").strip()
+    if not text:
+        return [Text("（空）", style="dim")]
+    try:
+        return _json_view(json.loads(text), _RESULT_MAX_CHARS, _RESULT_MAX_LINES)
+    except (ValueError, TypeError):
+        return _text_view(text, _RESULT_MAX_CHARS, _RESULT_MAX_LINES)
+
+
+def _diff_text(text):
+    """unified diff 着色：文件头加粗 / @@ 青色 / + 绿 / - 红 / 上下文灰"""
+    body = Text()
+    for i, line in enumerate(text.splitlines()):
+        if i:
+            body.append("\n")
+        if line.startswith(("+++", "---", "diff ")):
+            body.append(line, style="bold")
+        elif line.startswith("@@"):
+            body.append(line, style="cyan")
+        elif line.startswith("+"):
+            body.append(line, style="green")
+        elif line.startswith("-"):
+            body.append(line, style="red")
+        else:
+            body.append(line, style="dim")
+    return body
+
+
+def _diff_parts(result):
+    """带 diff 的结果（script 的写动作）：一行摘要 + 彩色 diff，不再回显整段 JSON。"""
+    head = " · ".join(str(result[k]) for k in ("action", "file") if result.get(k))
+    stats = []
+    lines = result.get("lines")
+    if isinstance(lines, list) and len(lines) == 2:
+        stats.append(f"行数 {lines[0]}→{lines[1]}")
+    for key, value in result.items():
+        if key in ("action", "file", "diff", "lines", "diff_truncated"):
+            continue
+        if isinstance(value, (dict, list)):
+            stats.append(f"{key}={json.dumps(value, ensure_ascii=False)}")
+        else:
+            stats.append(f"{key}={value}")
+    if result.get("diff_truncated"):
+        stats.append("diff 已折叠")
+    summary = Text()
+    summary.append(head or "diff", style="bold")
+    if stats:
+        summary.append("   " + " · ".join(stats), style="dim")
+
+    diff = result.get("diff") or ""
+    # 摘要占一行，正文与截断说明合计不超过 _RESULT_MAX_LINES 行
+    body, note = _clipped(diff, _RESULT_MAX_CHARS, _RESULT_MAX_LINES - 1, what="diff ")
+    parts = [summary]
+    if body:
+        parts.append(_diff_text(body))
+    if note:
+        parts.append(Text(note, style="dim"))
+    return parts
+
+
+def _tool_panel(parts, title, border=_PANEL_BORDER):
+    """工具调用/结果统一用浅灰框包起来：宽度自适应内容，前面留一空行"""
+    body = parts[0] if len(parts) == 1 else Group(*parts)
+    panel = Panel(
+        body,
+        title=Text(title, style="bold"),
+        title_align="left",
+        border_style=border,
+        padding=(0, 1),
+        expand=False,   # 不顶右边，按内容宽度收缩（超过终端宽度时自动换行）
+    )
+    return Group(Text(""), panel)
 
 
 class Renderer:
@@ -155,46 +298,34 @@ class Renderer:
         elif etype == "reasoning":
             self._feed("reasoning", evt.get("content", ""))
         elif etype == "question":
-            self._line(f"\n👤 用户问题: {evt.get('text', '')}")
+            pass   # 终端不再回显问题（与 CLI 一致）
         elif etype == "db":
-            self._line("🗄️  本地 SQLite + 在线 MySQL 同步" if evt.get("online")
-                       else "🗄️  使用本地 SQLite 数据库")
+            pass
         elif etype == "session":
-            action, sid = evt.get("action"), evt.get("id", "")
-            if action == "new":
-                self._line(f"\n🆕 新会话: {sid}")
-            elif action == "resume":
-                self._line(f"\n↩️  继续会话: {sid}")
-            elif action == "saved":
-                self._line(f"\n✅ 对话已保存到会话: {sid}")
+            pass
         elif etype == "memory":
-            if evt.get("phase") == "profile":
-                self._line("🔍 加载记忆索引... " + ("完成" if evt.get("found") else "无"))
-            else:
-                self._line("🔍 搜索相关记忆... " + ("找到相关记忆，注入上下文" if evt.get("found") else "无相关记忆。"))
+            pass
         elif etype == "config":
             self._line(f"⚙️  已更新 .env：{'、'.join(evt.get('keys', []))}")
         elif etype == "reasoning_header":
-            self._print(Text("🤔 思考过程", style="dim"), end="\n")
-            self._print(Text("─" * 60, style="dim"), end="\n")
+            pass   # 不再打印「思考过程」分隔线
         elif etype == "tool_round":
-            self._print(Text("=" * 30, style="dim"), end="\n")
-            self._line(f"🔧 执行工具 (第{evt.get('index')}轮): {evt.get('local')} 个本地调用 / {evt.get('search')} 个服务端搜索",
-                       style="bold yellow")
+            pass
         elif etype == "continuing":
-            self._print(Text("=" * 30, style="dim"), end="\n")
-            self._line("🤔 继续推理...", style="dim italic")
+            pass
         elif etype == "tool_call":
+            parts = []
             if evt.get("parse_error"):
-                self._line(f"⚠️ 工具 {evt.get('name')} 参数解析失败: {evt.get('parse_error')}", style="bold red")
+                parts.append(Text(f"⚠️ 参数解析失败: {evt.get('parse_error')}", style="bold red"))
+            if evt.get("arguments") is not None:
+                parts.extend(_json_view(evt.get("arguments"), _CALL_JSON_LIMIT))
+            elif evt.get("raw"):
+                parts.extend(_text_view(evt.get("raw"), _CALL_TEXT_LIMIT))
             else:
-                self._line(f"🔧 执行工具: {evt.get('name')}")
-                if evt.get("arguments") is not None:
-                    self._line(f"📥 参数: {json.dumps(evt.get('arguments'), ensure_ascii=False)}")
+                parts.append(Text("（无参数）", style="dim"))
+            self._print(_tool_panel(parts, f"🔧 执行工具 · {evt.get('name')}"))
         elif etype == "tool_result":
-            out = evt.get("output", "") or ""
-            preview = out[:200] + ("..." if len(out) > 200 else "")
-            self._line(f"📤 结果: {preview}")
+            self._tool_result(evt)
         elif etype == "search":
             if evt.get("state") == "call":
                 if evt.get("first"):
@@ -210,6 +341,24 @@ class Renderer:
             self._print(Text(_normalize_newlines(evt.get("text", ""))), end="")
         elif etype == "error":
             self._print(Text(f"\n[错误] {evt.get('error', '')}", style="bold red"))
+
+    def _tool_result(self, evt):
+        """工具结果：带 diff 的写动作展示彩色 diff，其余走 JSON/文本框（最多 15 行）"""
+        name = evt.get("name")
+        out = evt.get("output", "") or ""
+        error = bool(evt.get("error"))
+        try:
+            env = json.loads(out)
+        except (ValueError, TypeError):
+            env = None
+        result = env.get("result") if isinstance(env, dict) else None
+        if not error and isinstance(result, dict) and isinstance(result.get("diff"), str):
+            self._print(_tool_panel(_diff_parts(result), f"📝 变更 · {name}"))
+            return
+        self._print(_tool_panel(
+            _payload_parts(out),
+            ("❌ 结果 · " if error else "📤 结果 · ") + str(name),
+        ))
 
     def _usage(self, evt):
         default_period = "高峰时段（北京时间 周一至周五 9:00-12:00、14:00-18:00）" if evt.get("peak") \
