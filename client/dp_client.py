@@ -39,14 +39,16 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+from rich import box
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.panel import Panel
-from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from rich.theme import Theme
 
 
 def _force_utf8(stream):
@@ -66,7 +68,54 @@ def _force_utf8(stream):
 _force_utf8(sys.stdout)
 _force_utf8(sys.stderr)
 
-console = Console(highlight=False)
+# ── 终端视觉令牌 ────────────────────────────────────────────────────────────
+# 与 core/console.py 的 THEME 保持一致（客户端不依赖 core，这里保留一份副本）。
+# 颜色一律用固定灰阶（greyN）而非 "dim"：dim 是降亮度（SGR 2），在浅色终端
+# 里会把中灰压到接近白色而不可见；greyN 是固定索引色，浅底/深底都可读。
+THEME = Theme({
+    "accent":       "bold cyan",     # 主强调：标题、提示符
+    "title":        "bold",          # 区块标题
+    "muted":        "grey58",        # 次要文字（分隔符、状态副词）
+    "hint":         "grey54",        # 操作提示（怎么用）
+    "ok":           "green",
+    "warn":         "yellow",
+    "err":          "bold red",
+    "kv.key":       "grey62",        # 清单左列（键/标识）
+    "kv.val":       "default",       # 清单右列（跟随终端前景色）
+    "kv.num":       "bold",          # 数字列（靠右对齐 + 加粗，不靠颜色区分）
+    "panel.border": "grey54",        # 工具框描边
+    "panel.title":  "bold cyan",     # 工具框标题
+    "section.label": "grey58",       # 框内分区标题
+    "tbl.head":     "grey54",        # 表头
+    # 行内代码：rich 默认「bold cyan on black」，浅色终端里那块黑底很扎眼，去掉底色
+    "markdown.code": "cyan",
+})
+
+# 思考过程的终端样式（淡色斜体，和正文区分）
+_THINK_STYLE = "grey58 italic"
+
+console = Console(highlight=False, theme=THEME)
+
+_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+
+
+def flatten_headings(text: str) -> str:
+    """把 Markdown 标题降级成「加粗独立行」。
+
+    rich 的标题是居中大字（h1/h2 还带下划线），在连续的会话输出里像一条装饰横幅；
+    左对齐加粗更接近正文重点，也不额外占空行。代码块里的 # 注释保持原样。
+    """
+    if "#" not in text:
+        return text
+    lines, in_code = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+            lines.append(line)
+            continue
+        match = None if in_code else _HEADING.match(line)
+        lines.append(f"**{match.group(2)}**" if match else line)
+    return "\n".join(lines)
 
 
 def _normalize_newlines(text: str) -> str:
@@ -90,7 +139,19 @@ _CALL_TEXT_LIMIT = 300
 _RESULT_MAX_LINES = 20
 _RESULT_DIFF_MAX_LINES = 30
 _RESULT_MAX_CHARS = 4000
-_PANEL_BORDER = "grey50"
+
+# 工具框描边：默认静灰；出错时只换标题徽标与描边色，不改整体结构
+_PANEL_BORDER = "panel.border"
+_PANEL_MAX_WIDTH = 88   # 宽终端下不无限拉伸，保证多个框右边界对齐、行宽可控
+
+_PLAIN_SCALAR = re.compile(r"^[\w\u4e00-\u9fff][\w\u4e00-\u9fff./:@~^+-]*$")
+
+# 紧凑参数行里单个值的最长显示长度（文件路径、命令可能上百字符，
+# 不截断会把面板撑到满屏并折行，反而更难读；完整值在结果框里仍可见）
+_COMPACT_VALUE_MAX = 56
+
+# 紧凑参数行整体不超过这个长度才压成一行；超出改为逐行 key=value
+_COMPACT_INLINE_MAX = 84
 
 
 def _call_key(call_id, name):
@@ -152,11 +213,61 @@ def _expand_newlines(text):
     return _JSON_ESCAPE.sub(_escape_repl, text)
 
 
+def _scalar(value):
+    """紧凑行里的标量写法：裸值够清楚就不加引号，有空格/特殊字符才用 JSON 引号。"""
+    if isinstance(value, str):
+        text = value if _PLAIN_SCALAR.match(value) else json.dumps(value, ensure_ascii=False)
+    elif isinstance(value, bool):
+        text = "true" if value else "false"
+    elif value is None:
+        text = "null"
+    elif isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = str(value)
+    if len(text) > _COMPACT_VALUE_MAX:
+        text = text[:_COMPACT_VALUE_MAX - 1] + "…"
+    return text
+
+
+def _compact_view(value, char_limit, what=""):
+    """扁平 dict → 一行 `k=v · k=v`（键灰、值亮）；一行放不下就每个参数一行、键左对齐。
+
+    比 JSON 少一半字符：短参数不会把框撑成竖排，扫一眼就知道调了什么、带了什么；
+    参数多或值长时改用逐行形式，避免交给 Rich 在空格处乱折行（那会切断 `key=` 与值）。
+    """
+    pairs = [(str(k), _scalar(v)) for k, v in value.items()]
+    one_line = "  ·  ".join(f"{k}={v}" for k, v in pairs)
+    if len(one_line) <= min(_COMPACT_INLINE_MAX, char_limit):
+        line = Text()
+        for i, (key, val) in enumerate(pairs):
+            if i:
+                line.append("  ·  ", style="panel.border")
+            line.append(key, style="kv.key")
+            line.append("=", style="panel.border")
+            line.append(val)
+        return [line]
+
+    width = max(len(k) for k, _ in pairs)
+    block = Text()
+    for i, (key, val) in enumerate(pairs):
+        if i:
+            block.append("\n")
+        block.append(key.ljust(width), style="kv.key")
+        block.append(" = ", style="panel.border")
+        block.append(val)
+    return [block]
+
+
 def _json_view(value, char_limit, max_lines=None, inline=0, what="", inline_chars=None):
     """dict/list → 缩进 2 的彩色 JSON（含折叠说明）。
 
-    inline>0 时：展开换行后行数不超过 inline 就压成单行显示（短参数不占屏幕）。
+    inline>0 且是「扁平短参数字典」时压成一行 k=v（见 _compact_view）；
+    其余情况按缩进 JSON 展示，再按行/字符折叠。
     """
+    if (inline and isinstance(value, dict) and value
+            and all(not isinstance(v, (dict, list)) for v in value.values())):
+        return _compact_view(value, inline_chars or char_limit, what)
     try:
         pretty = json.dumps(value, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):
@@ -172,7 +283,7 @@ def _json_view(value, char_limit, max_lines=None, inline=0, what="", inline_char
         body, note = _clipped(pretty, char_limit, max_lines, what)
     parts = [_syntax_view(body)]
     if note:
-        parts.append(Text(note, style="dim"))
+        parts.append(Text(note, style="muted"))
     return parts
 
 
@@ -181,7 +292,7 @@ def _text_view(text, char_limit, max_lines=None, what=""):
     body, note = _clipped(text, char_limit, max_lines, what)
     parts = [Text(body)]
     if note:
-        parts.append(Text(note, style="dim"))
+        parts.append(Text(note, style="muted"))
     return parts
 
 
@@ -200,7 +311,7 @@ _MD_PATTERNS = (
 )
 
 # 结果 dict 里常见的「正文」字段：优先按文本/Markdown 展示，其余字段压成一行 meta
-_TEXT_KEYS = ("output", "stdout", "stderr", "content", "text", "message", "body", "detail")
+_TEXT_KEYS = ("output", "stdout", "stderr", "content", "text", "message", "body", "detail", "result")
 
 
 def _is_markdown(text):
@@ -212,7 +323,7 @@ def _auto_parts(text, max_lines, char_limit, what="结果 "):
     """按内容自动选渲染方式：JSON → 高亮；Markdown → 渲染；其他 → 纯文本。"""
     raw = (text or "").strip()
     if not raw:
-        return [Text("（空）", style="dim")]
+        return [Text("（空）", style="muted")]
     if raw[:1] in "{[":
         try:
             return _json_view(json.loads(raw), char_limit, max_lines, what=what)
@@ -220,9 +331,9 @@ def _auto_parts(text, max_lines, char_limit, what="结果 "):
             pass
     if _is_markdown(raw):
         body, note = _clipped(raw, char_limit, max_lines, what=what)
-        parts = [Markdown(body)]
+        parts = [Markdown(flatten_headings(body), justify="left")]
         if note:
-            parts.append(Text(note, style="dim"))
+            parts.append(Text(note, style="muted"))
         return parts
     return _text_view(raw, char_limit, max_lines, what=what)
 
@@ -239,7 +350,7 @@ def _meta_line(items):
     line = Text()
     for i, (key, value) in enumerate(items):
         if i:
-            line.append(" · ", style="dim")
+            line.append(" · ", style="muted")
         warn = key in ("truncated", "diff_truncated") and bool(value)
         shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         line.append(f"{key}={shown}", style="yellow" if warn else "dim")
@@ -248,7 +359,7 @@ def _meta_line(items):
 
 def _labeled(label, parts):
     """多个正文段时给每段加一行 dim 小标题"""
-    return [Text(label, style="dim")] + list(parts)
+    return [Text(label, style="muted")] + list(parts)
 
 
 def _envelope_parts(env, max_lines, char_limit):
@@ -267,7 +378,12 @@ def _envelope_parts(env, max_lines, char_limit):
             parts.append(Text(str(env["error"]), style="bold red"))
         if extras:
             parts.append(_meta_line(extras))
-        body = result if isinstance(result, str) else _dumps(result)
+        # 常见的错误体是 {message: "..."}：直接把消息当正文，别让用户读一层 JSON
+        message = None
+        if isinstance(result, dict):
+            message = next((result[k] for k in ("message", "error", "detail")
+                            if isinstance(result.get(k), str) and result[k]), None)
+        body = message if message else (result if isinstance(result, str) else _dumps(result))
         if body not in ("", "null"):
             parts.extend(_auto_parts(body, max_lines - len(parts), char_limit))
         if not parts:
@@ -278,7 +394,7 @@ def _envelope_parts(env, max_lines, char_limit):
     meta = list(extras)
     bodies = []      # [(label|None, text)]
     if result is None or result == "" or result == {} or result == []:
-        parts = [Text("（空）", style="dim")]
+        parts = [Text("（空）", style="muted")]
         if meta:
             parts.insert(0, _meta_line(meta))
         return parts
@@ -324,7 +440,7 @@ def _payload_parts(text):
     """结果正文：{status,result} 信封剥壳后按 result 内容渲染；其余按 JSON/Markdown/文本。"""
     text = (text or "").strip()
     if not text:
-        return [Text("（空）", style="dim")]
+        return [Text("（空）", style="muted")]
     try:
         env = json.loads(text)
     except (ValueError, TypeError):
@@ -349,7 +465,7 @@ def _diff_text(text):
         elif line.startswith("-"):
             body.append(line, style="red")
         else:
-            body.append(line, style="dim")
+            body.append(line, style="section.label")
     return body
 
 
@@ -372,7 +488,7 @@ def _diff_parts(result, max_lines=_RESULT_DIFF_MAX_LINES):
     summary = Text()
     summary.append(head or "diff", style="bold")
     if stats:
-        summary.append("   " + " · ".join(stats), style="dim")
+        summary.append("   " + " · ".join(stats), style="muted")
 
     diff = result.get("diff") or ""
     # 摘要占一行，diff 正文与折叠说明合计不超过 max_lines 行（script 编辑放宽到 30）
@@ -381,27 +497,78 @@ def _diff_parts(result, max_lines=_RESULT_DIFF_MAX_LINES):
     if body:
         parts.append(_diff_text(body))
     if note:
-        parts.append(Text(note, style="dim"))
+        parts.append(Text(note, style="muted"))
     return parts
 
 
-def _tool_panel(parts, title, border=_PANEL_BORDER):
-    """工具调用/结果统一用浅灰框包起来：宽度自适应内容，前面留一空行"""
+def _tool_panel(parts, title, status=None):
+    """工具调用/结果统一用一个圆角框包起来。
+
+    - 宽度取 min(终端宽, _PANEL_MAX_WIDTH)：同一轮里的多个框宽度一致，右边界成一条线；
+    - 标题左侧是「▸ 工具名」，右侧是状态徽标（✓ 完成 / ✗ 失败），一眼能扫出成败；
+    - 框前留一空行，与正文、上一个框之间保持呼吸感。
+    """
     body = parts[0] if len(parts) == 1 else Group(*parts)
+    width = max(24, min(console.width, _PANEL_MAX_WIDTH))
+    if status == "error":
+        subtitle, border = Text("✗ 失败", style="err"), "red"
+    elif status == "ok":
+        subtitle, border = Text("✓ 完成", style="ok"), _PANEL_BORDER
+    else:
+        subtitle, border = None, _PANEL_BORDER
     panel = Panel(
         body,
-        title=Text(title, style="bold"),
+        title=Text(title, style="panel.title"),
         title_align="left",
+        subtitle=subtitle,
+        subtitle_align="right",
         border_style=border,
+        box=box.ROUNDED,
         padding=(0, 1),
-        expand=False,   # 不顶右边，按内容宽度收缩（超过终端宽度时自动换行）
+        width=width,
+        # 注意：rich 的 Panel 在 expand=False 时会收缩到内容宽度、忽略 width，
+        # 想让同轮多个框右边界对齐只能 expand=True + 固定 width。
+        expand=True,
     )
     return Group(Text(""), panel)
 
 
-def _section(label, style="grey50", label_style="dim"):
-    """框内分区线：既是分隔线，也是结果/错误的标签（不额外占一行）"""
-    return Rule(Text(label, style=label_style), align="left", style=style)
+def _section(label, label_style="section.label"):
+    """框内分区标题：单独一行小字。
+
+    原来用 Rule（横线）当分隔，但 Rule 在 Panel 里渲染出的宽度比内容行少 2 列，
+    右边框会跟着错位；改成一行淡色小标题，既没有宽度问题，也比横线安静。
+    """
+    return Text(label, style=label_style)
+
+
+def _unwrap_arguments(arguments):
+    """拆掉 `{skill: x, arguments: {...}}` 这层信封，直接展示真正的参数。
+
+    工具调用普遍是「工具名 + 参数包」两层，外层名字已经在框标题上，
+    再留一层缩进会让每个调用多出 3~4 行；摊平后内层参数能压成一行。
+    """
+    if not isinstance(arguments, dict):
+        return arguments
+    if len(arguments) > 2:
+        return arguments
+    for key in ("arguments", "args", "parameters", "params"):
+        inner = arguments.get(key)
+        if isinstance(inner, dict) and inner:
+            rest = {k: v for k, v in arguments.items()
+                    if k not in (key, "skill", "tool", "name")}
+            return {**rest, **inner}
+    return arguments
+
+
+def _call_label(name, arguments):
+    """框标题：`工具名` 或 `工具名 · 目标`（skill/ssh 这类按子项调用的工具，光有工具名看不出在干什么）"""
+    if isinstance(arguments, dict):
+        for key in ("skill", "tool", "host"):
+            value = arguments.get(key)
+            if isinstance(value, str) and value and value != name:
+                return f"{name} · {value}"
+    return name
 
 
 def _result_parts(evt):
@@ -415,10 +582,10 @@ def _result_parts(evt):
     result = env.get("result") if isinstance(env, dict) else None
     # script 类写动作：结果里带 diff，就展示摘要 + 彩色 diff，而不是整段 JSON
     if not error and isinstance(result, dict) and isinstance(result.get("diff"), str):
-        return [_section("📝 变更")] + _diff_parts(result)
+        return [_section("变更")] + _diff_parts(result)
     if error:
-        return [_section("❌ 错误", style="red", label_style="bold red")] + _payload_parts(out)
-    return [_section("📤 结果")] + _payload_parts(out)
+        return [_section("错误", label_style="bold red")] + _payload_parts(out)
+    return [_section("结果")] + _payload_parts(out)
 
 
 class Renderer:
@@ -479,9 +646,9 @@ class Renderer:
             return
         text = "".join(self._buf)
         if self._kind == "reasoning":
-            self._live.update(Text(text, style="dim italic"))
+            self._live.update(Text(text, style=_THINK_STYLE))
         else:
-            self._live.update(Markdown(text))
+            self._live.update(Markdown(flatten_headings(text), justify="left"))
         self._live.refresh()
         self._last = time.monotonic()
         self._dirty = False
@@ -496,6 +663,48 @@ class Renderer:
 
     def _line(self, text, style=None):
         self._print(Text(text, style=style) if style else Text(text))
+
+    def _block(self, title, body, note=None):
+        """统一的区块排版：空行 + 标题 + 缩进内容 +（可选）操作提示。
+
+        与 core/console.py 的 _block 一致；内容整体左缩进 2 格与标题对齐，
+        表格用 pad_edge=False 以免右端拖出一串空白。
+        """
+        had_live = self._live is not None
+        self._stop_live()
+        if had_live:
+            console.print()
+        console.print(Text(f"  {title}", style="title"))
+        console.print(Padding(body, (0, 0, 0, 2), expand=False))
+        if note:
+            for line in note.splitlines():
+                console.print(Text(f"  {line}", style="hint"))
+
+    def _render_grid(self, title, header, rows, aligns=None, note=None, foot=0):
+        """多列数字清单（统计用）：表头灰阶小字，数字列右对齐便于纵向比对。
+
+        foot=n：最后 n 行按「合计行」加粗（与明细拉开层次，不需要再画分隔线）。
+        """
+        aligns = aligns or ["left"] * len(header)
+        table = Table(box=None, show_header=True, show_edge=False,
+                      padding=(0, 2), pad_edge=False, expand=False, header_style="tbl.head")
+        for name, align in zip(header, aligns):
+            table.add_column(name, justify=align, no_wrap=True,
+                             style="kv.num" if align == "right" else "kv.val")
+        for i, row in enumerate(rows):
+            bold = foot and i >= len(rows) - foot
+            table.add_row(*[Text(str(c), style="title") if bold else str(c) for c in row])
+        self._block(title, table, note)
+
+    def _say(self, message, level="info"):
+        """单行提示：统一缩进、图标与配色（ok / warn / err / info）"""
+        icon, style = {
+            "ok": ("✅", "ok"),
+            "warn": ("⚠", "warn"),
+            "err": ("❌", "err"),
+            "info": ("·", "muted"),
+        }.get(level, ("·", "muted"))
+        self._print(Text(f"  {icon} {message}", style=style))
 
     # ---- 各类事件 ----
     def handle(self, etype, evt):
@@ -512,7 +721,7 @@ class Renderer:
         elif etype == "memory":
             pass
         elif etype == "config":
-            self._line(f"⚙️  已更新 .env：{'、'.join(evt.get('keys', []))}")
+            self._print(Text(f"  ▸ 已更新 .env：{'、'.join(evt.get('keys', []))}", style="ok"))
         elif etype == "reasoning_header":
             pass   # 不再打印「思考过程」分隔线
         elif etype == "tool_round":
@@ -522,42 +731,57 @@ class Renderer:
         elif etype == "tool_call":
             parts = []
             if evt.get("parse_error"):
-                parts.append(Text(f"⚠️ 参数解析失败: {evt.get('parse_error')}", style="bold red"))
+                parts.append(Text(f"参数解析失败：{evt.get('parse_error')}", style="err"))
             if evt.get("arguments") is not None:
                 parts.extend(_json_view(
-                    evt.get("arguments"), _CALL_MAX_CHARS, _CALL_MAX_LINES,
+                    _unwrap_arguments(evt.get("arguments")), _CALL_MAX_CHARS, _CALL_MAX_LINES,
                     inline=_CALL_INLINE_LINES, what="参数 ", inline_chars=_CALL_JSON_LIMIT,
                 ))
             elif evt.get("raw"):
                 parts.extend(_text_view(evt.get("raw"), _CALL_TEXT_LIMIT, _CALL_MAX_LINES, what="参数 "))
             else:
-                parts.append(Text("（无参数）", style="dim"))
+                parts.append(Text("（无参数）", style="muted"))
             # 先缓存，等结果到达时合并到同一个框里输出
-            self._pending_calls[_call_key(evt.get("id"), evt.get("name"))] = (evt.get("name"), parts)
+            self._pending_calls[_call_key(evt.get("id"), evt.get("name"))] = (
+                _call_label(evt.get("name"), evt.get("arguments")), parts)
         elif etype == "tool_result":
             self._tool_result(evt)
         elif etype == "search":
+            had_live = self._live is not None
+            self._stop_live()
+            if had_live:
+                console.print()
             if evt.get("state") == "call":
                 if evt.get("first"):
-                    self._print(Text("\n🔎 服务端网页搜索：", style="bold cyan"), end="\n")
-                self._line(f"  - 搜索调用 {evt.get('id', '')} 已发起", style="cyan")
+                    console.print()
+                    console.print(Text("  🔎 服务端搜索", style="accent"))
+                line = Text("    · ", style="panel.border")
+                line.append("发起 ", style="muted")
+                line.append(str(evt.get("id", "")), style="kv.key")
+                console.print(line)
             else:
-                self._line(f"  - 搜索状态: {evt.get('state')}", style="cyan")
+                line = Text("    · ", style="panel.border")
+                line.append("状态 ", style="muted")
+                line.append(str(evt.get("state")), style="muted")
+                console.print(line)
         elif etype == "warning":
-            self._line(f"⚠️  {evt.get('message', '')}", style="bold red")
+            # 警告不是错误：黄色 + 缩进，和红色的失败区分开
+            self._print(Text(f"  ⚠ {evt.get('message', '')}", style="warn"))
         elif etype == "usage":
             self._usage(evt)
         elif etype == "log":
             self._print(Text(_normalize_newlines(evt.get("text", ""))), end="")
         elif etype == "error":
             self.flush_pending_calls()
-            self._print(Text(f"\n[错误] {evt.get('error', '')}", style="bold red"))
+            self._stop_live()
+            console.print()
+            self._print(Text(f"  ❌ {evt.get('error', '')}", style="err"))
 
     def flush_pending_calls(self):
         """结果一直没到（执行被中断）时兜底输出，避免调用信息丢失。"""
         while self._pending_calls:
             name, parts = self._pending_calls.popitem()[1]
-            self._print(_tool_panel(list(parts), f"🔧 {name}"))
+            self._print(_tool_panel(list(parts), f"▸ {name}", status="pending"))
 
     def _tool_result(self, evt):
         """工具结果：与对应的调用合并成一个框（diff / 错误 / 普通结果各自分组）"""
@@ -568,7 +792,8 @@ class Renderer:
         else:
             tool_name, parts = name, []
         parts.extend(_result_parts(evt))
-        self._print(_tool_panel(parts, f"🔧 {tool_name}"))
+        self._print(_tool_panel(parts, f"▸ {tool_name}",
+                                status="error" if evt.get("error") else "ok"))
 
     def _usage(self, evt):
         self.flush_pending_calls()   # 收尾：异常中断时残留的调用框先补输出
@@ -578,21 +803,34 @@ class Renderer:
         symbol = evt.get("symbol")
         if symbol is None:
             symbol = "¥" if evt.get("currency") == "CNY" else ""
-        self._print(Text(f"\n⏰ {period}", style="bold"))
-        table = Table(show_header=False, border_style="dim")
-        table.add_column("Key", style="bold")
-        table.add_column("Value", style="cyan")
-        table.add_row("输入(缓存命中)", f"{evt.get('hit', 0):,} tokens  {symbol}{evt.get('cost_hit', 0):.4f}")
-        table.add_row("输入(缓存未命中)", f"{evt.get('miss', 0):,} tokens  {symbol}{evt.get('cost_miss', 0):.4f}")
-        table.add_row("输出", f"{evt.get('out', 0):,} tokens  {symbol}{evt.get('cost_out', 0):.4f}")
-        table.title = f"📊 Token 消耗统计 · {evt.get('model', '')} · 合计 {symbol}{evt.get('total', 0):.4f}"
-        self._print(table)
+
+        def money(value):
+            return f"{symbol}{value:.4f}"
+
+        # period 形如「空闲时段（北京时间 …）」：括号里是规则说明，放标题会折行，
+        # 标题只留时段名，规则细节用户可在 .env / 文档里查
+        short_period = period.split("（")[0]
+        rows = [
+            ("输入 · 缓存命中", f"{evt.get('hit', 0):,}", money(evt.get("cost_hit", 0))),
+            ("输入 · 未命中", f"{evt.get('miss', 0):,}", money(evt.get("cost_miss", 0))),
+            ("输出", f"{evt.get('out', 0):,}", money(evt.get("cost_out", 0))),
+            ("合计", "", money(evt.get("total", 0))),
+        ]
+        self._render_grid(f"用量 · {evt.get('model', '')} · {short_period}",
+                          ["项目", "tokens", "费用"], rows,
+                          aligns=["left", "right", "right"], foot=1)
+        # 服务商与余额压成一行：表格只放数字，说明性信息不占额外的行
         balance = evt.get("balance")
+        tail = Text("  ")
+        provider = evt.get("provider")
+        if provider:
+            tail.append(str(provider), style="kv.key")
         if balance is not None:
-            currency = evt.get("currency", "")
-            self._print(Text(f"💰 账户余额：{symbol}{balance} {currency}".rstrip(), style="bold green"))
+            tail.append("   💰 余额 ", style="muted")
+            tail.append(f"{symbol}{balance}", style="ok")
         else:
-            self._line("💰 账户余额：查询失败", style="dim")
+            tail.append("   💰 余额 查询失败", style="muted")
+        console.print(tail)
 
     def finish(self):
         self.flush_pending_calls()
@@ -703,15 +941,15 @@ def main():
     except HTTPError as e:
         renderer.finish()
         body = e.read().decode("utf-8", errors="replace")
-        console.print(f"[bold red]HTTP 错误 {e.code}:[/bold red] {body}")
+        console.print(Text(f"  ❌ HTTP {e.code}：{body}", style="err"))
         sys.exit(1)
     except URLError as e:
         renderer.finish()
-        console.print(f"[bold red]连接失败:[/bold red] {e.reason}")
+        console.print(Text(f"  ❌ 连接失败：{e.reason}", style="err"))
         sys.exit(1)
     except Exception as e:
         renderer.finish()
-        console.print(f"[bold red]请求异常:[/bold red] {str(e)}")
+        console.print(Text(f"  ❌ 请求异常：{e}", style="err"))
         sys.exit(1)
 
     renderer.finish()
