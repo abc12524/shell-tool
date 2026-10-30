@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -11,8 +12,10 @@ import time
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.table import Table
 from rich.text import Text
+from rich.theme import Theme
 
 # API 模式：由 server/api.py 注入 DP_API_MODE=1。此时 stdout 不再直接输出终端
 # 文本，而是输出「一行一个 JSON 事件」的结构化流：
@@ -107,7 +110,35 @@ _force_utf8(sys.stderr)
 if _API_MODE:
     sys.stdout = _DiagStream()
 
-console = Console(highlight=False)
+# ── 终端视觉令牌 ────────────────────────────────────────────────────────────
+# 统一在这里定义语义色与组件样式，events.py / main.py 只引用样式名而不写死颜色，
+# 保证工具框、统计表、提示语共用同一套视觉语言（改一处即全局生效）。
+# 颜色一律用固定灰阶（greyN）而非 "dim"：dim 是降亮度（SGR 2），在浅色终端
+# 里会把中灰压到接近白色而不可见；greyN 是固定索引色，浅底/深底都可读。
+THEME = Theme({
+    # 灰阶取中间段（grey54~grey62）：更亮的灰在白底浅色终端里会消失，更暗的在深底看不见
+    "accent":       "bold cyan",     # 主强调：标题、提示符
+    "title":        "bold",          # 区块标题
+    "muted":        "grey58",        # 次要文字（分隔符、状态副词）
+    "hint":         "grey54",        # 操作提示（怎么用）
+    "ok":           "green",
+    "warn":         "yellow",
+    "err":          "bold red",
+    "kv.key":       "grey62",        # 清单左列（键/标识）
+    "kv.val":       "default",       # 清单右列（跟随终端前景色）
+    "kv.num":       "bold",          # 数字列（靠右对齐 + 加粗，不靠颜色区分）
+    "panel.border": "grey54",        # 工具框描边
+    "panel.title":  "bold cyan",     # 工具框标题
+    "section.label": "grey58",       # 框内分区标题
+    "tbl.head":     "grey54",        # 表头
+    # 行内代码：rich 默认「bold cyan on black」，浅色终端里那块黑底很扎眼，去掉底色
+    "markdown.code": "cyan",
+})
+
+# 思考过程的终端样式（淡色斜体，和正文区分）
+_THINK_STYLE = "grey58 italic"
+
+console = Console(highlight=False, theme=THEME)
 
 
 # 终端下 Live 每秒最多重绘次数。cmd/conhost 对「上移光标 + 清行 + 重画」较慢，
@@ -202,7 +233,7 @@ class LiveMarkdown(_LiveStream):
     _kind = "content"
 
     def _render(self, text):
-        return Markdown(text)
+        return Markdown(flatten_headings(text), justify="left")
 
 
 class LiveReasoning(_LiveStream):
@@ -211,24 +242,108 @@ class LiveReasoning(_LiveStream):
     _kind = "reasoning"
 
     def _render(self, text):
-        return Text(text, style="dim italic")
+        return Text(text, style=_THINK_STYLE)
+
+
+_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+
+
+def flatten_headings(text: str) -> str:
+    """把 Markdown 标题降级成「加粗独立行」。
+
+    rich 的标题是居中大字（h1/h2 还带下划线），在连续的会话输出里像一条装饰横幅；
+    左对齐加粗更接近正文重点，也不额外占空行。代码块里的 # 注释保持原样。
+    """
+    if "#" not in text:
+        return text
+    lines, in_code = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+            lines.append(line)
+            continue
+        match = None if in_code else _HEADING.match(line)
+        lines.append(f"**{match.group(2)}**" if match else line)
+    return "\n".join(lines)
 
 
 def render_markdown(text: str):
-    """一次性渲染 Markdown"""
-    console.print(Markdown(text))
+    """一次性渲染 Markdown
+
+    justify="left"：rich 默认两端对齐，中文段落会被硬撑出大段空隙；
+    终端里左对齐更好读，避免长句被拉成「稀疏的一行」。
+    """
+    console.print(Markdown(flatten_headings(text), justify="left"))
 
 
-def render_table(title: str, rows: list[tuple[str, str]], style: str = "cyan"):
-    """渲染简易表格"""
-    table = Table(title=title, show_header=False, border_style="dim")
-    table.add_column("Key", style="bold")
-    table.add_column("Value", style=style)
+def _block(title, body, note=None):
+    """统一的区块排版：空行 + 标题 + 内容 +（可选）操作提示。
+
+    所有清单类输出共用这一个外壳，保证标题、缩进、与后续提示的间距一致。
+    note 可含多行，每行都按同一缩进对齐（提示语能按「键 + 说明」竖排）。
+    内容整体左缩进 2 格：与标题对齐，同时让表格右端不带多余空白（pad_edge=False）。
+    """
+    console.print()
+    console.print(Text(f"  {title}", style="title"))
+    console.print(Padding(body, (0, 0, 0, 2), expand=False))
+    if note:
+        for line in note.splitlines():
+            console.print(Text(f"  {line}", style="hint"))
+
+
+def render_table(title: str, rows: list[tuple[str, str]], style: str = "kv.key",
+                 note: str | None = None):
+    """两列清单：左列（标识/名称，可强调）左对齐，右列（描述）自动换行。
+
+    无边框、无竖线——终端里表格线会和中文字符争宽度，反而显脏；
+    用缩进 + 列对齐 + 灰阶层次来分区，浅色/深色终端都干净。
+    """
+    table = Table(
+        box=None, show_header=False, show_edge=False,
+        padding=(0, 2), pad_edge=False, expand=False,
+    )
+    table.add_column(justify="left", no_wrap=True)
+    table.add_column(justify="left", overflow="fold", style="kv.val")
     for k, v in rows:
-        table.add_row(k, str(v))
-    console.print(table)
+        # 键/值都允许传 Text（需要局部着色，如 enable/disable、当前项标记），其余按字符串处理
+        table.add_row(k if isinstance(k, Text) else Text(str(k), style=style),
+                      v if isinstance(v, Text) else str(v))
+    _block(title, table, note)
+
+
+def render_grid(title: str, header: list[str], rows: list[tuple], aligns: list[str] | None = None,
+                note: str | None = None, foot: int = 0):
+    """多列数字清单（统计/报表用）：表头灰阶小字，数字列右对齐便于纵向比对。
+
+    foot=n：最后 n 行按「合计行」加粗（与明细拉开层次，不需要再画分隔线）。
+    """
+    aligns = aligns or ["left"] * len(header)
+    table = Table(box=None, show_header=True, show_edge=False,
+                  padding=(0, 2), pad_edge=False, expand=False, header_style="tbl.head")
+    for name, align in zip(header, aligns):
+        table.add_column(name, justify=align, no_wrap=True,
+                         style="kv.num" if align == "right" else "kv.val")
+    for i, row in enumerate(rows):
+        bold = foot and i >= len(rows) - foot
+        table.add_row(*[Text(str(c), style="title") if bold else str(c) for c in row])
+    _block(title, table, note)
+
+
+def say(message: str, level: str = "info"):
+    """单行提示：统一缩进、图标与配色（ok / warn / err / info）。
+
+    原文案里「⚠️ 两个空格」和「✅ 一个空格」混用，一列提示排下来就是错位的；
+    统一成「图标 + 一个空格」，并交给主题着色，成功/警告/失败一眼可辨。
+    """
+    icon, style = {
+        "ok": ("✅", "ok"),
+        "warn": ("⚠", "warn"),
+        "err": ("❌", "err"),
+        "info": ("·", "muted"),
+    }.get(level, ("·", "muted"))
+    console.print(Text(f"  {icon} {message}", style=style))
 
 
 def render_reasoning(text: str):
     """一次性渲染思考过程"""
-    console.print(Text(text, style="dim italic"))
+    console.print(Text(text, style=_THINK_STYLE))

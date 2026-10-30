@@ -11,7 +11,9 @@ from . import db
 from . import llm
 from . import billing
 from . import events
-from .console import console, render_table, _API_MODE
+from rich.text import Text
+
+from .console import console, render_table, say, _API_MODE
 from .tools import get_system_info
 from .tools.skill_tool import disclosed_skills, set_status, skills_overview
 from .tools.skill_hub import remote_skills, install as hub_install, remove as hub_remove, source_label as hub_source
@@ -68,8 +70,8 @@ def parse_args(argv):
                 show_skills = True
                 i += 1
             else:
-                print("⚠️  -S/--skill 需要 <名称> <enable|disable>，例如：-S my_skill disable"
-                      "（不带参数则列出全部 skill）")
+                say("-S/--skill 需要 <名称> <enable|disable>，例如：-S my_skill disable"
+                    "（不带参数则列出全部 skill）", "warn")
                 sys.exit(1)
         elif a in ('-I', '--install'):
             names = []
@@ -94,7 +96,7 @@ def parse_args(argv):
                 hub_action = ('delete', names)
                 i = j
             else:
-                print("⚠️  -D/--delete 需要指定 skill 名称（可用 -S 查看已装 skill）")
+                say("-D/--delete 需要指定 skill 名称（可用 -S 查看已装 skill）", "warn")
                 sys.exit(1)
         elif a in ('-s', '--session'):
             if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
@@ -109,14 +111,14 @@ def parse_args(argv):
                 api_key = argv[i + 1]
                 i += 2
             else:
-                print("⚠️  -k/--key 需要指定 API Key")
+                say("-k/--key 需要指定 API Key", "warn")
                 sys.exit(1)
         elif a in ('-m', '--model'):
             if i + 1 < len(argv) and argv[i + 1].strip():
                 model = argv[i + 1]
                 i += 2
             else:
-                print("⚠️  -m/--model 需要指定模型名")
+                say("-m/--model 需要指定模型名", "warn")
                 sys.exit(1)
         else:
             question_parts.append(a)
@@ -125,15 +127,30 @@ def parse_args(argv):
             api_key, model, skill_status, show_skills, hub_action)
 
 
+def _state_text(state, desc):
+    """清单值：状态词单独着色（启用=绿 / 停用=灰），描述保持次要灰。
+
+    一列纯文本里状态是最需要被扫到的信息，给它颜色比给整行颜色更省视觉噪音。
+    """
+    style = {"enable": "ok", "disable": "muted", "已装": "ok", "未装": "muted",
+             "活跃": "ok", "已结束": "muted"}.get(state, "kv.val")
+    line = Text(state, style=style)
+    if desc:
+        line.append(" · ", style="panel.border")
+        line.append(desc, style="kv.val")
+    return line
+
+
 def print_skills():
     """列出全部 skill 及其 status（供 -S 无参数查看）"""
     overview = skills_overview()
     if not overview:
-        console.print("暂无已注册 skill", style="dim")
+        console.print("暂无已注册 skill", style="muted")
         return
-    rows = [(name, f"{status} · {desc}") for name, (status, desc) in sorted(overview.items())]
-    render_table(f"🧰 已注册 skill（{len(rows)}）", rows)
-    console.print("开关：python dp.py -S <名称> <enable|disable>", style="dim")
+    rows = [(name, _state_text(status, desc))
+            for name, (status, desc) in sorted(overview.items())]
+    render_table(f"🧰 已注册 skill（{len(rows)}）", rows,
+                 note="开关  python dp.py -S <名称> <enable|disable>")
 
 
 def print_remote_skills():
@@ -141,18 +158,23 @@ def print_remote_skills():
     try:
         skills = remote_skills()
     except RuntimeError as e:
-        print(f"⚠️  {e}")
+        say(f"{e}", "warn")
         sys.exit(1)
     if not skills:
-        console.print("远程仓库暂无技能", style="dim")
+        console.print("远程仓库暂无技能", style="muted")
         return
     rows = []
     for s in skills:
         mark = "已装" if s.get("installed") else "未装"
         plat = "/".join(s.get("platform") or []) or "-"
-        rows.append((s["name"], f"{mark} · {plat} · {s.get('description', '')}"))
-    render_table(f"🌐 远程 skill（{hub_source()}，{len(rows)}）", rows)
-    console.print("安装：python dp.py -I <名称>", style="dim")
+        line = _state_text(mark, plat)
+        desc = s.get("description", "")
+        if desc:
+            line.append(" · ", style="panel.border")
+            line.append(desc, style="kv.val")
+        rows.append((s["name"], line))
+    render_table(f"🌐 远程 skill（{hub_source()}，{len(rows)}）", rows,
+                 note="安装  python dp.py -I <名称>")
 
 
 def new_session_id():
@@ -175,7 +197,7 @@ def resolve_session(new_flag, sid):
     """
     if sid:
         if not db.session_exists(sid):
-            print(f"⚠️  会话 {sid} 不存在")
+            say(f"会话 {sid} 不存在", "warn")
             sys.exit(1)
         return sid, False
 
@@ -218,17 +240,23 @@ def print_recent_sessions(limit=5):
     """列出最近若干条会话（供 -s 无参数查看）"""
     sessions = db.list_recent_sessions(limit)
     if not sessions:
-        console.print("暂无历史会话", style="dim")
+        console.print("暂无历史会话", style="muted")
         return
     active_id = db.get_active_session_id()
     rows = []
     for s in sessions:
         when = local_time_str(s['updated_at'])
-        status_txt = "活跃" if s['status'] == 'active' else "已结束"
-        mark = " ●" if s['id'] == active_id else ""
-        rows.append((s['id'], f"{status_txt} · {when} · {s['n']} 条消息{mark}"))
-    render_table(f"🕘 最近 {len(sessions)} 条会话", rows)
-    console.print("继续会话：python dp.py -s <id> \"你的问题\"", style="dim")
+        is_active = s['id'] == active_id
+        state = "活跃" if s['status'] == 'active' else "已结束"
+        value = _state_text(state, when)
+        value.append(" · ", style="panel.border")
+        value.append(f"{s['n']} 条消息", style="kv.val")
+        # 当前会话的圆点放到行首：行尾的标记要被读到最后一个字符才会发现
+        name = Text("● ", style="ok") + Text(s['id'], style="kv.key") if is_active \
+            else Text(f"  {s['id']}", style="kv.key")
+        rows.append((name, value))
+    render_table(f"🕘 最近 {len(sessions)} 条会话", rows,
+                 note='继续  python dp.py -s <id> "你的问题"')
 
 
 # 每轮上下文注入：user_turn / skill 名单 / OV / user_tips 合并为一条
@@ -374,7 +402,7 @@ async def _async_main():
     if skill_status:
         name, value = skill_status
         good, message = set_status(name, value)
-        print(("✅ " if good else "⚠️  ") + message)
+        say(message, "ok" if good else "warn")
         sys.exit(0 if good else 1)
 
     # -I/--install：列远程 / 下载安装 skill 后退出（不建会话、不调用模型）
@@ -389,22 +417,22 @@ async def _async_main():
                 try:
                     res = hub_remove(skill_name)
                 except RuntimeError as e:
-                    print(f"⚠️  删除失败 '{skill_name}'：{e}")
+                    say(f"删除失败 '{skill_name}'：{e}", "warn")
                     failed += 1
                     continue
-                print(f"✅ 已删除 skill '{res['name']}'")
+                say(f"已删除 skill '{res['name']}'", "ok")
             sys.exit(0 if not failed else 1)
         failed = 0
         for skill_name in name:
             try:
                 res = hub_install(skill_name)
             except RuntimeError as e:
-                print(f"⚠️  安装失败 '{skill_name}'：{e}")
+                say(f"安装失败 '{skill_name}'：{e}", "warn")
                 failed += 1
                 continue
             extra = "，已生成 config.json（请填配置）" if res.get("config_created") else ""
             deps = "，依赖：" + ", ".join(res["requires"]) if res.get("requires") else ""
-            print(f"✅ 已安装 skill '{res['name']}'（{len(res['files'])} 个文件{extra}{deps}）")
+            say(f"已安装 skill '{res['name']}'（{len(res['files'])} 个文件{extra}{deps}）", "ok")
         sys.exit(0 if not failed else 1)
 
     # -k/-m：覆盖并写回 .env，本次进程与后续进程（含 8000 端口调用）均生效
@@ -420,7 +448,7 @@ async def _async_main():
     try:
         db.resolve_backend()
     except Exception as e:
-        print(f"❌ 数据库初始化失败：{e}")
+        say(f"数据库初始化失败：{e}", "err")
         sys.exit(1)
 
     # -s 无参数：只列出最近会话后退出
@@ -436,13 +464,13 @@ async def _async_main():
             session_id, is_new = resolve_session(new_flag, sid)
             events.ev_session("new" if is_new else "resume", session_id)
             if not _API_MODE:
-                print(f"✅ 已开启新会话：{session_id}")
+                say(f"已开启新会话：{session_id}", "ok")
             sys.exit(0)
         print(USAGE)
         sys.exit(0)
 
     if not config.DEEPSEEK_API_KEY:
-        print("⚠️  缺少 DEEPSEEK_API_KEY，请在 .env 中配置")
+        say("缺少 DEEPSEEK_API_KEY，请在 .env 中配置", "err")
         sys.exit(1)
 
     events.ev_db(db.online_enabled())
