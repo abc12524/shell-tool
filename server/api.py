@@ -40,6 +40,7 @@ DEEPSEEK_PATH = os.path.join(PROJECT_ROOT, "dp.py")
 PYTHON = sys.executable
 
 HEARTBEAT_INTERVAL = 15  # 秒：超过该时间无输出则发心跳注释保活
+SYNC_TIMEOUT = 120      # 秒：/chat 同步接口等待子进程的上限
 
 
 def build_args(data):
@@ -123,25 +124,56 @@ def _child_stdout_to_text(raw):
 
 
 def _reap(process):
-    """杀掉整个进程组并回收，杜绝僵尸/孤儿（客户端断开或异常时调用）"""
-    try:
-        pgid = os.getpgid(process.pid)
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, Exception):
-        pass
-    deadline = time.time() + 5
-    while time.time() < deadline:
+    """杀掉子进程（含子孙）并回收，杜绝僵尸/孤儿（客户端断开或异常时调用）。
+
+    Windows 没有进程组信号——os.getpgid / os.killpg / os.WNOHANG / signal.SIGKILL
+    在 Windows 上都不存在（调用即 AttributeError），改用 taskkill /F /T 按父子链
+    杀整棵树；POSIX 则杀子进程所在的整个进程组。
+    """
+    if os.name == 'nt':
         try:
-            pid, _ = os.waitpid(-process.pid, os.WNOHANG)
-            if pid == 0:
-                time.sleep(0.05)
-                continue
-        except ChildProcessError:
-            break
-    try:
-        process.wait(timeout=2)
-    except Exception:
-        pass
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+        except Exception:
+            pass
+        try:
+            process.kill()
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            pass
+    else:
+        try:
+            pgid = os.getpgid(process.pid)
+        except (ProcessLookupError, OSError):
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            else:
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    try:
+                        pid, _ = os.waitpid(-pgid, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if pid == 0:
+                        time.sleep(0.05)
+                        continue
+                    break
+        try:
+            process.wait(timeout=2)
+        except Exception:
+            pass
     for stream in (process.stdout, process.stderr):
         try:
             stream.close()
@@ -163,29 +195,42 @@ def chat():
     args = build_args(data)
     cmd = [PYTHON, DEEPSEEK_PATH] + args + ([question] if question else [])
 
+    # 强制子进程以 UTF-8 输出：Windows 下管道默认 locale 编码(GBK)，
+    # 会让 Rich 边框/中文乱码；这里统一按 UTF-8 编码与解码。
+    env = build_env(data)
+    popen_kwargs = {
+        'stdout': subprocess.PIPE,
+        'stderr': subprocess.PIPE,
+        'cwd': os.path.dirname(DEEPSEEK_PATH),
+        'env': env,
+    }
+    if os.name != 'nt':
+        # POSIX：独立进程组，超时才能 killpg 连带子孙（Windows 用 taskkill /T）
+        popen_kwargs['start_new_session'] = True
     try:
-        # 强制子进程以 UTF-8 输出：Windows 下管道默认 locale 编码(GBK)，
-        # 会让 Rich 边框/中文乱码；这里统一按 UTF-8 编码与解码。
-        env = build_env(data)
-        result = subprocess.run(
-            cmd, capture_output=True, timeout=120,
-            cwd=os.path.dirname(DEEPSEEK_PATH),
-            env=env, encoding="utf-8", errors="replace",
-        )
-        # DP_API_MODE 下 stderr 是诊断日志（非错误）；仅在进程失败时当作错误返回
-        error = (result.stderr or "").strip() if result.returncode != 0 else None
-        return jsonify({
-            "status": "ok",
-            "result": {
-                "question": question,
-                "reply": _child_stdout_to_text(result.stdout),
-                "error": error,
-            },
-        })
-    except subprocess.TimeoutExpired:
-        return jsonify({"status": "error", "error": "请求超时", "code": "timeout"}), 504
+        process = subprocess.Popen(cmd, **popen_kwargs)
     except Exception as e:
         return jsonify({"status": "error", "error": str(e), "code": "internal"}), 500
+
+    try:
+        out_bytes, err_bytes = process.communicate(timeout=SYNC_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # run() 的 timeout 只杀直接子进程；这里走统一回收，连子孙一起清掉
+        _reap(process)
+        return jsonify({"status": "error", "error": "请求超时", "code": "timeout"}), 504
+
+    stdout = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
+    stderr = err_bytes.decode("utf-8", errors="replace") if err_bytes else ""
+    # DP_API_MODE 下 stderr 是诊断日志（非错误）；仅在进程失败时当作错误返回
+    error = (stderr or "").strip() if process.returncode != 0 else None
+    return jsonify({
+        "status": "ok",
+        "result": {
+            "question": question,
+            "reply": _child_stdout_to_text(stdout),
+            "error": error,
+        },
+    })
 
 
 @app.route("/chat/stream", methods=["POST"])
@@ -272,38 +317,42 @@ def chat_stream():
         t_out.start()
         t_err.start()
 
-        yield _sse("start")
-
-        while True:
-            try:
-                item = q.get(timeout=HEARTBEAT_INTERVAL)
-            except queue.Empty:
-                # 心跳保活；读取线程已结束时（且无更多数据）即可停止
-                if not t_out.is_alive():
-                    break
-                yield ": heartbeat\n\n"
-                continue
-            if item is None:  # EOF
-                break
-            if item:
-                yield _child_event_to_sse(item)
-
-        t_out.join(timeout=2)
-        t_err.join(timeout=2)
-        # stdout 已 EOF 说明子进程基本结束，但进程本身可能还没被回收：
-        # 此时 poll() 会返回 None，导致崩溃被误判成正常结束（客户端只收到 done，
-        # 看不到 traceback）。先等它真正退出，超时再退回 poll() 的瞬时结果。
+        # finally 兜底回收：客户端断开时 Flask 会关闭生成器（GeneratorExit 抛在 yield 处），
+        # 走不到函数末尾，若不在 finally 里杀子进程，它会继续把这一轮 token 烧完。
         try:
-            rc = process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            rc = process.poll()
-        err_text = "".join(stderr_buf).strip()
-        if rc and rc != 0:
-            err = err_text or f"进程退出码 {rc}"
-            yield _sse("error", error=err, code="process_error")
-        else:
-            yield _sse("done")
-        _reap(process)
+            yield _sse("start")
+
+            while True:
+                try:
+                    item = q.get(timeout=HEARTBEAT_INTERVAL)
+                except queue.Empty:
+                    # 心跳保活；读取线程已结束时（且无更多数据）即可停止
+                    if not t_out.is_alive():
+                        break
+                    yield ": heartbeat\n\n"
+                    continue
+                if item is None:  # EOF
+                    break
+                if item:
+                    yield _child_event_to_sse(item)
+
+            t_out.join(timeout=2)
+            t_err.join(timeout=2)
+            # stdout 已 EOF 说明子进程基本结束，但进程本身可能还没被回收：
+            # 此时 poll() 会返回 None，导致崩溃被误判成正常结束（客户端只收到 done，
+            # 看不到 traceback）。先等它真正退出，超时再退回 poll() 的瞬时结果。
+            try:
+                rc = process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                rc = process.poll()
+            err_text = "".join(stderr_buf).strip()
+            if rc and rc != 0:
+                err = err_text or f"进程退出码 {rc}"
+                yield _sse("error", error=err, code="process_error")
+            else:
+                yield _sse("done")
+        finally:
+            _reap(process)
 
     return Response(
         stream_with_context(generate()),
@@ -335,7 +384,7 @@ def _reap_orphans(*_args):
 
 
 if __name__ == "__main__":
-    # 仅在作为 1 号进程（容器入口）时注册兜底回收
-    if os.getpid() == 1:
+    # 仅在作为 1 号进程（容器入口）时注册兜底回收；Windows 无 SIGCHLD / WNOHANG，跳过
+    if os.name != 'nt' and os.getpid() == 1:
         signal.signal(signal.SIGCHLD, _reap_orphans)
     app.run(host="0.0.0.0", port=8000, debug=False)

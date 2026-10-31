@@ -750,6 +750,13 @@ async def chat_completion_with_tools(messages, session_id=None, ov_session_id=No
         assistant_msg = build_assistant_msg(content, reasoning, tool_calls, output_items)
         new_history_messages.append(force_msg)
 
+    # 落库前最后一道关：预算耗尽后的最后一次响应若仍带工具调用，这些调用已不会再执行，
+    # 原样入库会让下一轮历史出现"tool_calls 后无 tool 回复"，协议直接 400 且无法自愈。
+    final_msg = db.strip_tool_calls(assistant_msg)
+    if final_msg is not assistant_msg:
+        events.ev_warning("最终轮模型仍请求调用工具，已剥离该调用以保证历史可重放",
+                          code="orphan_tool_calls", silent=True)
+        assistant_msg = final_msg
     new_history_messages.append(assistant_msg)
     _persist(session_id, ov_session_id, [assistant_msg])
 

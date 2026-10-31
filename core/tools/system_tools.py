@@ -58,46 +58,76 @@ def _ps_encode_command(command: str) -> list:
     return ['powershell.exe', '-Command', stripped]
 
 
-def run_cmd_reap(cmd_args: list, timeout: int):
-    """运行子进程并在超时/异常时杀掉整个进程组并回收，避免僵尸/孤儿。
+_IS_WINDOWS = (os.name == 'nt')
+# Windows 专用标志：taskkill 是控制台程序，无窗口启动避免在 GUI 宿主里闪黑框
+_CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
-    关键点：
-    - 使用 start_new_session=True 让子进程成为独立会话/进程组 leader，
-      这样超时杀组时可以连带干掉它的所有子孙（如 bash -c 派生的 dpkg/gzip）。
-    - 超时后显式 killpg + 循环 waitpid 回收整个进程组，
-      否则被遗弃的子进程会被宿主(PID 1)收养并最终变成僵尸。
+
+def _kill_process_tree(proc):
+    """强制结束子进程及其全部子孙进程（跨平台）。
+
+    POSIX：子进程由 start_new_session 成为独立会话/进程组 leader，killpg 连带子孙，
+           再循环 waitpid 回收整个进程组，避免被 PID 1 收养后变僵尸。
+    Windows：没有进程组信号——os.getpgid / os.killpg / os.WNOHANG / signal.SIGKILL
+           这些接口在 Windows 上根本不存在（调用即 AttributeError），
+           改用 taskkill /F /T 按父子链杀整棵树，失败再退回 proc.kill()。
     """
-    proc = subprocess.Popen(
-        cmd_args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
+    if _IS_WINDOWS:
+        try:
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return
+
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        return
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            pid, _ = os.waitpid(-pgid, os.WNOHANG)
+            if pid == 0:
+                time.sleep(0.05)
+                continue
+        except ChildProcessError:
+            break
+
+
+def run_cmd_reap(cmd_args: list, timeout: int):
+    """运行子进程并在超时/异常时杀掉整棵进程树并回收，避免僵尸/孤儿。
+
+    回收机制因平台而异（见 _kill_process_tree），这里只统一"超时 → 杀树 → 回收 → 抛出"
+    的时序：超时后必须再 communicate 一次，否则管道残留输出与句柄不会释放。
+    Windows 上不建独立进程组，让 Ctrl+C 仍能正常传给子进程（杀树靠 taskkill /T）。
+    """
+    kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE}
+    if not _IS_WINDOWS:
+        # POSIX：让子进程成为独立会话/进程组 leader，超时时可 killpg 连带子孙
+        kwargs['start_new_session'] = True
+
+    proc = subprocess.Popen(cmd_args, **kwargs)
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
         return proc.returncode, stdout, stderr
     except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
         try:
-            pgid = os.getpgid(proc.pid)
-        except ProcessLookupError:
-            pgid = None
-        if pgid is not None:
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            # 回收整个进程组（含所有子孙），避免遗漏
-            deadline = time.time() + 5
-            while time.time() < deadline:
-                try:
-                    pid, _ = os.waitpid(-pgid, os.WNOHANG)
-                    if pid == 0:
-                        time.sleep(0.05)
-                        continue
-                except ChildProcessError:
-                    break
-        try:
-            proc.wait(timeout=2)
+            proc.communicate(timeout=10)
         except Exception:
             pass
         raise

@@ -447,6 +447,112 @@ def _sync_pending():
                           code="mysql_sync_failed")
 
 
+# ============= 工具调用配对（历史合法性） =============
+# 协议硬约束：assistant 的每个 tool_calls 后面必须紧跟对应的 tool 消息，
+# 否则整条请求直接 400 且不可重试。以下三个函数负责让"落库"和"重放"两侧都满足它。
+def _tool_call_id(tc):
+    """取工具调用 id：兼容 dict 与服务端对象两种承载。"""
+    if isinstance(tc, dict):
+        return tc.get('id')
+    return getattr(tc, 'id', None)
+
+
+def _is_function_call_item(item):
+    """responses 协议 output_items 里的函数调用条目（回传时会变成 function_call）。"""
+    return isinstance(item, dict) and item.get('type') == 'function_call'
+
+
+def strip_tool_calls(msg):
+    """摘掉单条 assistant 消息里的工具调用（含 output_items 中的 function_call 条目）。
+
+    用于"工具预算耗尽、模型仍要求调用工具"的场景：这些调用不会再被执行，若原样落库，
+    下一轮把它当历史重放时必然 400，且该会话之后每一轮都会失败（一次性污染、永久报废）。
+    同时要摘 output_items 里的 function_call——responses 协议优先透传 output_items，
+    只清 tool_calls 等于没清。
+
+    返回新 dict；无需改动时返回原对象（调用方可用 `is` 判断是否发生了剥离）。
+    """
+    if not isinstance(msg, dict):
+        return msg
+    calls = msg.get('tool_calls') or []
+    items = msg.get('output_items') or []
+    orphan_items = [it for it in items if _is_function_call_item(it)]
+    if not calls and not orphan_items:
+        return msg
+
+    out = dict(msg)
+    if calls:
+        out.pop('tool_calls', None)
+    if items:
+        kept = [it for it in items if not _is_function_call_item(it)]
+        if kept:
+            out['output_items'] = kept
+        else:
+            out.pop('output_items', None)
+    return out
+
+
+def sanitize_tool_pairs(msgs):
+    """把消息序列配平：摘掉"无人应答的调用"与"无对应调用的工具结果"。
+
+    这是历史数据的自愈层——旧版本曾在预算耗尽时把未执行的 tool_calls 落库，
+    这类会话重放时会 400；读出来时在此剔除，会话即可继续使用，不需要人工改库。
+
+    - 调用被保留 ⇔ 存在同 call_id 的 tool 结果
+    - 工具结果被保留 ⇔ 它应答的调用仍在（否则协议同样报错）
+    - 调用与正文都被摘光、只剩空壳的 assistant 消息整条丢弃（无信息量）
+    """
+    declared = set()
+    answered = set()
+    for m in msgs:
+        role = m.get('role')
+        if role == 'assistant':
+            for tc in (m.get('tool_calls') or []):
+                cid = _tool_call_id(tc)
+                if cid:
+                    declared.add(cid)
+            for it in (m.get('output_items') or []):
+                if _is_function_call_item(it) and it.get('call_id'):
+                    declared.add(it['call_id'])
+        elif role == 'tool':
+            cid = m.get('tool_call_id')
+            if cid:
+                answered.add(cid)
+
+    paired = declared & answered
+    out = []
+    for m in msgs:
+        role = m.get('role')
+        if role == 'tool':
+            if m.get('tool_call_id') in paired:
+                out.append(m)
+            continue
+        if role != 'assistant':
+            out.append(m)
+            continue
+
+        calls = [tc for tc in (m.get('tool_calls') or [])
+                 if _tool_call_id(tc) in paired]
+        items = [it for it in (m.get('output_items') or [])
+                 if not _is_function_call_item(it) or it.get('call_id') in paired]
+        # 只剩 message/reasoning/web_search_call 等非调用条目时，它们本身是有内容的
+        has_payload = any(not _is_function_call_item(it) for it in items)
+        if not calls and not has_payload and not (m.get('content') or '').strip():
+            continue
+
+        new = dict(m)
+        if calls:
+            new['tool_calls'] = calls
+        else:
+            new.pop('tool_calls', None)
+        if items:
+            new['output_items'] = items
+        else:
+            new.pop('output_items', None)
+        out.append(new)
+    return out
+
+
 # ============= 消息序列构建 =============
 def _build_msgs(rows):
     msgs = []
@@ -475,7 +581,11 @@ def _build_msgs(rows):
                 m['output_items'] = json.loads(row['output_items_json'])
             msgs.append(m)
 
-    # 保证消息序列合法：开头不能是孤立的 tool 结果或未配对的 tool_calls
+    # 配平工具调用：历史里若残留"未执行的 tool_calls"（旧版本预算耗尽时落库的），
+    # 在此剔除；否则重放时协议会 400 且该会话永久不可用。
+    msgs = sanitize_tool_pairs(msgs)
+
+    # 兜底：开头不能是孤立的 tool 结果或未配对的 tool_calls
     while msgs and (
         msgs[0].get('role') == 'tool'
         or (msgs[0].get('role') == 'assistant' and msgs[0].get('tool_calls'))
