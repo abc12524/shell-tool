@@ -17,6 +17,8 @@
 """
 import hashlib
 import json
+import os
+import time
 from types import SimpleNamespace
 
 import requests
@@ -184,10 +186,36 @@ def _get_headers(session_id=None):
     return headers
 
 
+# 瞬时错误状态码（限流 / 服务过载 / 网关抖动）：自动重试
+_TRANSIENT_STATUS = (429, 500, 502, 503, 504)
+# 瞬时错误最大尝试次数（含首次；默认 4 次，退避 2s/4s/8s）。0/1 = 不重试。
+MAX_API_ATTEMPTS = max(1, int(os.environ.get('MAX_API_ATTEMPTS', '4')))
+
+
+def _extract_api_message(body, fallback):
+    """从错误响应体提取可读信息：优先 JSON 的 error.message，退回原文截断 / 异常串。
+
+    DeepSeek 过载时返回 {"error":{"message":"Service is too busy. ..."}}，
+    直接透传原文比让用户面对整段 JSON 更容易看懂。
+    """
+    try:
+        err = json.loads(body).get('error')
+        if isinstance(err, dict) and err.get('message'):
+            return err['message']
+    except (ValueError, AttributeError):
+        pass
+    return (body or '').strip()[:300] or fallback
+
+
 def _post_stream(path, headers, payload):
-    """发起流式 POST 并返回响应对象；网关不支持 stream_options 时去掉重试一次。"""
+    """发起流式 POST 并返回响应对象。
+
+    - 网关不支持 stream_options 时去掉该字段重试一次
+    - 429/5xx 等瞬时错误（限流、服务过载）按指数退避自动重试，
+      每次重试在终端打印警告；重试耗尽后抛出带可读原因的 RuntimeError
+    """
     url = _get_api_url(path)
-    for attempt in (1, 2):
+    for attempt in range(1, MAX_API_ATTEMPTS + 1):
         try:
             resp = requests.post(url, headers=headers, json=payload, stream=True,
                                  timeout=(15, 600))
@@ -201,10 +229,19 @@ def _post_stream(path, headers, payload):
                 except Exception:
                     body = ''
             status = e.response.status_code if e.response is not None else '?'
-            if attempt == 1 and 'stream_options' in body.lower() and 'stream_options' in payload:
+            if 'stream_options' in body.lower() and 'stream_options' in payload:
                 payload.pop('stream_options', None)
                 continue
-            raise RuntimeError(f"API {status}: {body[:300] or str(e)}")
+            # 瞬时错误（限流/过载）→ 指数退避重试；最后一次不再等
+            if status in _TRANSIENT_STATUS and attempt < MAX_API_ATTEMPTS:
+                delay = 2 ** attempt
+                events.ev_warning(
+                    f"API {status}（服务繁忙/限流），{delay}s 后自动重试"
+                    f"（第 {attempt}/{MAX_API_ATTEMPTS - 1} 次）",
+                    code="api_retry")
+                time.sleep(delay)
+                continue
+            raise RuntimeError(f"API {status}: {_extract_api_message(body, str(e))}")
         except requests.exceptions.Timeout:
             raise RuntimeError("API 请求超时，请稍后重试")
         except requests.exceptions.ConnectionError:

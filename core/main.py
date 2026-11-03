@@ -521,8 +521,18 @@ async def _async_main():
     messages = [{"role": "system", "content": system_prompt}] + stored
 
     events.ev_question(question)
-    full_content, full_reasoning, final_usage, assistant_msg, tool_results, new_history_msgs = \
-        await llm.chat_completion_with_tools(messages, session_id=session_id, ov_session_id=ov_session_id)
+    try:
+        full_content, full_reasoning, final_usage, assistant_msg, tool_results, new_history_msgs = \
+            await llm.chat_completion_with_tools(messages, session_id=session_id, ov_session_id=ov_session_id)
+    except KeyboardInterrupt:
+        raise
+    except RuntimeError as e:
+        # API 层已给出可读原因（如 DeepSeek 503 过载、余额不足、模型名错误），
+        # 这里一行提示收尾即可，不再向用户抛原始 traceback。
+        say(f"调用失败：{e}", "err")
+        say("若为服务繁忙（503/429），稍等片刻重试即可；也可在 .env 中切换 "
+            "DEEPSEEK_BASE_URL / DEEPSEEK_MODEL 使用备用服务商。", "hint")
+        sys.exit(1)
 
     events.ev_session("saved", session_id)
     if config.OV_CAPTURE and ov_session_id:
