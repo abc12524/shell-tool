@@ -16,7 +16,9 @@ from rich.text import Text
 from .console import console, render_table, say, _API_MODE
 from .tools import get_system_info
 from .tools.skill_tool import disclosed_skills, set_status, skills_overview
-from .tools.skill_hub import remote_skills, install as hub_install, remove as hub_remove, source_label as hub_source
+from .tools.skill_hub import (remote_skills, search_skills,
+                              install as hub_install, remove as hub_remove,
+                              source_label as hub_source)
 from .recall import (
     openviking_load_context,
     openviking_load_profile,
@@ -32,7 +34,8 @@ USAGE = """使用方法：python dp.py [选项] [问题]
   -n, --new    → 终结当前对话，并新开一个对话（可只给 -n 不带问题：仅开新会话不开聊）
   -s, --session [id] → 不带 id：列出最近 5 条会话；带 id：继续指定会话（可指定历史会话）
   -S, --skill [名称] [enable|disable] → 不带参数：列出全部 skill 及 status；带参数：开关该 skill 的 status
-  -I, --install [名称...] → 不带名称：列出远程可装 skill；带名称（可多个，空格分隔）：从远程仓库下载安装到本地 skill/
+  -I, --install [名称...] → 不带名称：列出远程可装 skill；带名称（可多个，空格分隔）：从远程仓库下载安装到本地 skill/；
+                    名称不完整（如 hua）时按前缀搜索并列出候选
   -D, --delete <名称...> → 删除已安装的本地 skill 文件夹（可多个，空格分隔）
   -k, --key <key>    → 覆盖 DEEPSEEK_API_KEY，并写回 .env
   -m, --model <name> → 覆盖 DEEPSEEK_MODEL，并写回 .env
@@ -153,13 +156,18 @@ def print_skills():
                  note="开关  python dp.py -S <名称> <enable|disable>")
 
 
-def print_remote_skills():
-    """列出远程技能仓库中的可装 skill（供 -I 无参数查看）"""
-    try:
-        skills = remote_skills()
-    except RuntimeError as e:
-        say(f"{e}", "warn")
-        sys.exit(1)
+def print_remote_skills(skills=None, caption=None):
+    """列出远程技能仓库中的 skill（供 -I 无参数查看 / -I 前缀搜索）
+
+    skills 为已拉取的技能列表（避免重复请求）；为 None 时自动拉取全部。
+    caption 用于标注搜索条件，如 "匹配 'hua'"。
+    """
+    if skills is None:
+        try:
+            skills = remote_skills()
+        except RuntimeError as e:
+            say(f"{e}", "warn")
+            sys.exit(1)
     if not skills:
         console.print("远程仓库暂无技能", style="muted")
         return
@@ -173,7 +181,8 @@ def print_remote_skills():
             line.append(" · ", style="panel.border")
             line.append(desc, style="kv.val")
         rows.append((s["name"], line))
-    render_table(f"🌐 远程 skill（{hub_source()}，{len(rows)}）", rows,
+    extra = f" · {caption}" if caption else ""
+    render_table(f"🌐 远程 skill{extra}（{hub_source()}，{len(rows)}）", rows,
                  note="安装  python dp.py -I <名称>")
 
 
@@ -423,7 +432,32 @@ async def _async_main():
                 say(f"已删除 skill '{res['name']}'", "ok")
             sys.exit(0 if not failed else 1)
         failed = 0
+        # 先按远程索引解析名称：完全匹配 → 安装；不完整 → 按前缀搜索并列候选
+        try:
+            index = remote_skills()
+        except RuntimeError as e:
+            say(f"{e}", "warn")
+            sys.exit(1)
+        by_name = {s["name"]: s["name"] for s in index}
+        by_lower = {s["name"].lower(): s["name"] for s in index}
+        targets, searched, missing = [], [], []
         for skill_name in name:
+            canonical = by_name.get(skill_name) or by_lower.get(skill_name.lower())
+            if canonical:
+                if canonical not in targets:
+                    targets.append(canonical)
+                continue
+            hits = search_skills(index, skill_name)
+            if hits:
+                searched.append((skill_name, hits))
+            else:
+                missing.append(skill_name)
+        for keyword, hits in searched:
+            print_remote_skills(hits, f"匹配 '{keyword}'")
+        for skill_name in missing:
+            say(f"远程仓库没有 skill '{skill_name}'（可用 python dp.py -I 查看全部）", "warn")
+            failed += 1
+        for skill_name in targets:
             try:
                 res = hub_install(skill_name)
             except RuntimeError as e:

@@ -115,6 +115,14 @@ def remote_skills():
     return out
 
 
+def search_skills(skills, keyword):
+    """按名称前缀筛选远程技能（不区分大小写），供 -I 输入不完整名称时列候选。"""
+    kw = (keyword or "").strip().lower()
+    if not kw:
+        return list(skills)
+    return [s for s in skills if str(s.get("name") or "").lower().startswith(kw)]
+
+
 def _safe_relpath(rel):
     """校验相对路径安全：非绝对、无 .. 分量。"""
     rel = rel.replace("\\", "/").strip("/")
