@@ -32,8 +32,8 @@
 
 访问验证码：写在下面的 ACCESS_CODE 常量里（不用命令行传）。服务端（go-shell）配了
 API_ACCESS_KEY（至少 8 位）时，除 /health 外的接口都必须带对，否则 401——这时把同一个值
-填进 ACCESS_CODE 即可；服务端没配验证码时不校验，这个头会被忽略，留着也无害。
-Python 版服务端目前也不校验它。
+填进 ACCESS_CODE，客户端会以 Authorization: Bearer <code> 带上（只用请求头，不走地址栏）。
+服务端没配验证码时不校验，这个头会被忽略，留着也无害。Python 版服务端目前也不校验它。
 """
 import argparse
 import json
@@ -848,7 +848,7 @@ DEFAULT_PORT = os.environ.get("DP_PORT", "8000")
 DEFAULT_TIMEOUT = int(os.environ.get("DP_TIMEOUT", "300"))
 
 # 服务端访问验证码：直接改这里（对应 go-shell 的 .env: API_ACCESS_KEY，至少 8 位）。
-# 服务端开了验证就填成同一个值；没开就留空——非空时会以 X-Access-Key 头带上，
+# 服务端开了验证就填成同一个值；没开就留空——非空时以 Authorization: Bearer <code> 带上，
 # 服务端不校验时会直接忽略，所以留着也不影响。
 ACCESS_CODE = "FCiwP3Ym"
 
@@ -912,7 +912,7 @@ def main():
 
     headers = {"Content-Type": "application/json"}
     if ACCESS_CODE.strip():
-        headers["X-Access-Key"] = ACCESS_CODE.strip()
+        headers["Authorization"] = f"Bearer {ACCESS_CODE.strip()}"
 
     req = Request(
         url,
