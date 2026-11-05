@@ -29,6 +29,11 @@
 用法：
   dp.py [-H 主机] [-P 端口] [-n] [-t 超时秒] [-k KEY] [-m MODEL] <问题...>
 环境变量 DP_HOST / DP_PORT / DP_TIMEOUT 可覆盖默认值。
+
+访问验证码：写在下面的 ACCESS_CODE 常量里（不用命令行传）。服务端（go-shell）配了
+API_ACCESS_KEY（至少 8 位）时，除 /health 外的接口都必须带对，否则 401——这时把同一个值
+填进 ACCESS_CODE 即可；服务端没配验证码时不校验，这个头会被忽略，留着也无害。
+Python 版服务端目前也不校验它。
 """
 import argparse
 import json
@@ -842,6 +847,11 @@ DEFAULT_HOST = os.environ.get("DP_HOST", "192.168.30.181")
 DEFAULT_PORT = os.environ.get("DP_PORT", "8000")
 DEFAULT_TIMEOUT = int(os.environ.get("DP_TIMEOUT", "300"))
 
+# 服务端访问验证码：直接改这里（对应 go-shell 的 .env: API_ACCESS_KEY，至少 8 位）。
+# 服务端开了验证就填成同一个值；没开就留空——非空时会以 X-Access-Key 头带上，
+# 服务端不校验时会直接忽略，所以留着也不影响。
+ACCESS_CODE = "FCiwP3Ym"
+
 
 def _handle_event(event_text, renderer):
     """处理单个 SSE event 块（已去掉末尾空行）。
@@ -900,10 +910,14 @@ def main():
     if args.model:
         payload["model"] = args.model
 
+    headers = {"Content-Type": "application/json"}
+    if ACCESS_CODE.strip():
+        headers["X-Access-Key"] = ACCESS_CODE.strip()
+
     req = Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
 
@@ -941,7 +955,27 @@ def main():
     except HTTPError as e:
         renderer.finish()
         body = e.read().decode("utf-8", errors="replace")
-        console.print(Text(f"  ❌ HTTP {e.code}：{body}", style="err"))
+        if e.code == 401:
+            # 服务端（go-shell）配了 API_ACCESS_KEY：要么没带，要么带错
+            code = detail = ""
+            try:
+                payload = json.loads(body)
+                code = payload.get("code") or ""
+                detail = payload.get("error") or ""
+            except (json.JSONDecodeError, AttributeError):
+                pass
+            reason = "服务端要求访问验证码" if code == "access_code_required" else "访问验证码不正确"
+            console.print(Text(f"  ❌ HTTP 401：{reason}", style="err"))
+            console.print(
+                Text("     把服务端 .env 的 API_ACCESS_KEY 填进 dp_client.py 顶部的 ACCESS_CODE 常量",
+                     style="hint")
+            )
+            if detail:
+                console.print(Text(f"     {detail}", style="muted"))
+            elif body:
+                console.print(Text(f"     {body}", style="muted"))
+        else:
+            console.print(Text(f"  ❌ HTTP {e.code}：{body}", style="err"))
         sys.exit(1)
     except URLError as e:
         renderer.finish()

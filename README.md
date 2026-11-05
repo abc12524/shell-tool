@@ -248,6 +248,11 @@ curl http://localhost:8000/health
 
 `:` 开头的行为注释 / 心跳，忽略。
 
+**访问验证码**：服务端若启用了访问验证码（`.env` 的 `API_ACCESS_KEY`，至少 8 位），
+除 `/health` 以外的接口都要带 `X-Access-Key`，否则 401。`client/dp_client.py` 把验证码
+写成顶部常量 `ACCESS_CODE`（也可 `Authorization: Bearer <code>` 或 `?key=<code>`）；
+常量留空则不带。Python 版服务端目前不校验该头，带上会被忽略。
+
 ## 工具调用流程
 
 对话开始时批量并行执行模型请求的全部工具调用，结果一次性回传后直接输出最终回答；若模型在最终轮仍请求调用工具，在 `MAX_TOOL_ROUNDS` 预算内可再执行，超出则强制基于已有结果作答。所有工具统一返回规范信封 `{"status":"ok","result":{...}}` / `{"status":"error","error":...}`，与 OpenViking 后端及 DSH 会话格式保持一致。
