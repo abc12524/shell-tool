@@ -62,6 +62,26 @@ MAX_TOOL_ROUNDS = int(os.environ.get('MAX_TOOL_ROUNDS', '6'))
 # false=关闭，模型不再触发服务端网页搜索（默认）；true=向模型提供内置联网搜索。
 LLM_WEB_SEARCH = os.environ.get('LLM_WEB_SEARCH', 'false') in ('1', 'true', 'True', 'yes')
 
+# ===== 命令输出修剪（rtk-web）=====
+# execute_system_command 的 bash / PowerShell 输出先交给 rtk-web 压缩；
+# 服务不可达、超时、4xx/5xx 或返回异常时静默回退原始输出。
+RTK_WEB_ENABLED = os.environ.get('RTK_WEB_ENABLED', 'true') in ('1', 'true', 'True', 'yes')
+# 地址必须在 .env 中显式配置；留空则不修剪输出（不回退任何内置地址）
+RTK_WEB_HOST = (os.environ.get('RTK_WEB_HOST', '') or '').strip()
+_rtk_web_port = (os.environ.get('RTK_WEB_PORT', '') or '').strip()
+RTK_WEB_PORT = int(_rtk_web_port) if _rtk_web_port else 0
+# auto=激进有损（默认，省得多）/ chain=固定链（可预期）
+RTK_WEB_MODE = (os.environ.get('RTK_WEB_MODE', 'auto') or 'auto').strip().lower()
+if RTK_WEB_MODE not in ('auto', 'chain'):
+    RTK_WEB_MODE = 'auto'
+# term / json / web / matches / lockfile / auto
+RTK_WEB_FORMAT = (os.environ.get('RTK_WEB_FORMAT', 'term') or 'term').strip().lower()
+if RTK_WEB_FORMAT not in ('term', 'json', 'web', 'matches', 'lockfile', 'auto'):
+    RTK_WEB_FORMAT = 'term'
+RTK_WEB_TIMEOUT = max(0.5, float(os.environ.get('RTK_WEB_TIMEOUT', '10') or '10'))
+# 请求失败后暂停调用多少秒，避免服务宕机时每条命令都等超时
+RTK_WEB_RETRY_SECONDS = max(0.0, float(os.environ.get('RTK_WEB_RETRY_SECONDS', '60') or '60'))
+
 # ===== 调试 =====
 # 打印每轮发送给 API 的消息序列 hash（role:md5），默认关闭
 DEBUG_SEND_SEQ = os.environ.get('DEBUG_SEND_SEQ', '0') in ('1', 'true', 'True')

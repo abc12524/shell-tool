@@ -8,8 +8,11 @@ import shutil
 import signal
 import subprocess
 import time
+import urllib.parse
+import urllib.request
 
 from .envelope import ok, error
+from .. import config
 
 
 def get_system_info():
@@ -147,6 +150,103 @@ def _decode_output(data: bytes) -> str:
     return data.decode(sys_enc, errors='replace').strip()
 
 
+# rtk-web 请求体上限（服务端 RTK_WEB_MAX_BODY 默认 10 MiB）；过大时直接跳过修剪
+_RTK_WEB_MAX_BYTES = 9 * 1024 * 1024
+# 服务失败后的熔断截止时间（monotonic），避免服务宕机时每条命令都卡超时
+_RTK_WEB_DOWN_UNTIL = 0.0
+
+
+def _rtk_web_base_url() -> str:
+    """按 RTK_WEB_HOST / RTK_WEB_PORT 拼服务地址，兼容 host 自带 scheme/port。
+
+    未配置 host / port 时返回空字符串，调用方跳过修剪。
+    """
+    host = config.RTK_WEB_HOST.strip()
+    if not host:
+        return ''
+    if '://' not in host:
+        host = f'http://{host}'
+    parts = urllib.parse.urlsplit(host)
+    netloc = parts.netloc
+    if parts.port is None:
+        if not config.RTK_WEB_PORT:
+            return ''
+        netloc = f'{netloc}:{config.RTK_WEB_PORT}'
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path.rstrip('/'), '', ''))
+
+
+def _header_number(headers, name: str, default):
+    """读取 X-Rtk-* 数字头，缺失或非法时返回默认值。"""
+    value = headers.get(name)
+    if value is None:
+        return default
+    try:
+        return type(default)(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _trim_with_rtk_web(text: str):
+    """把命令输出交给 rtk-web 压缩。
+
+    成功返回 (压缩后文本, 统计)；服务不可达、超时、非 2xx、解码失败或
+    压缩后不更短时返回 None，调用方直接使用原始输出。
+    """
+    global _RTK_WEB_DOWN_UNTIL
+    if not config.RTK_WEB_ENABLED or not text:
+        return None
+    if time.monotonic() < _RTK_WEB_DOWN_UNTIL:
+        return None
+
+    base_url = _rtk_web_base_url()
+    if not base_url:
+        return None
+
+    payload = text.encode('utf-8')
+    if len(payload) > _RTK_WEB_MAX_BYTES:
+        return None
+
+    try:
+        query = urllib.parse.urlencode({
+            'format': config.RTK_WEB_FORMAT,
+            'mode': config.RTK_WEB_MODE,
+            'lossless': 'false',
+            'charset': 'utf-8',
+        })
+        request = urllib.request.Request(
+            f'{base_url}/api/compress?{query}',
+            data=payload,
+            headers={'Content-Type': 'text/plain; charset=utf-8'},
+            method='POST',
+        )
+        with urllib.request.urlopen(request, timeout=config.RTK_WEB_TIMEOUT) as response:
+            body = response.read()
+            headers = response.headers
+    except Exception:
+        if config.RTK_WEB_RETRY_SECONDS > 0:
+            _RTK_WEB_DOWN_UNTIL = time.monotonic() + config.RTK_WEB_RETRY_SECONDS
+        return None
+
+    _RTK_WEB_DOWN_UNTIL = 0.0
+    try:
+        trimmed = body.decode('utf-8')
+    except UnicodeDecodeError:
+        return None
+    if not trimmed or len(trimmed) >= len(text):
+        return None
+
+    stats = {
+        'saved_percent': _header_number(
+            headers,
+            'X-Rtk-Saved-Percent',
+            round((len(text) - len(trimmed)) / len(text) * 100, 1),
+        ),
+        'bytes_before': _header_number(headers, 'X-Rtk-Bytes-Before', len(payload)),
+        'bytes_after': _header_number(headers, 'X-Rtk-Bytes-After', len(body)),
+    }
+    return trimmed, stats
+
+
 def execute_system_command(command: str) -> str:
     """执行系统命令并返回结果（跨平台支持）"""
     os_type = platform.system().lower()
@@ -175,6 +275,16 @@ def execute_system_command(command: str) -> str:
         else:
             output = "命令执行成功（无输出）"
 
+        # 先过 rtk-web 修剪，再按字符上限截断；服务异常时保留原始输出
+        compression = None
+        if stdout or stderr:
+            try:
+                trimmed = _trim_with_rtk_web(output)
+            except Exception:
+                trimmed = None
+            if trimmed:
+                output, compression = trimmed
+
         # 限制输出长度，避免 token 过大
         max_length = 6000
         truncated = False
@@ -182,11 +292,14 @@ def execute_system_command(command: str) -> str:
             output = output[:max_length] + f"\n... (输出被截断，原长度 {len(output)} 字符)"
             truncated = True
 
-        return ok({
+        result = {
             "output": output,
             "exit_code": returncode,
             "truncated": truncated,
-        })
+        }
+        if compression:
+            result["compression"] = compression
+        return ok(result)
     except subprocess.TimeoutExpired:
         return error("命令执行超时（1小时）", code="timeout")
     except Exception as e:
