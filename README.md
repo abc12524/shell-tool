@@ -116,7 +116,7 @@ cp .env.example .env
 | `MAX_TOOL_ROUNDS` | 工具调用最大轮数（默认 6） |
 | `LLM_WEB_SEARCH` | LLM 内置联网搜索（DeepSeek Responses API 自带 web_search）开关：`false`=关闭（默认），`true`=开启 |
 | `RTK_WEB_ENABLED` | `execute_system_command` 输出是否经 rtk-web 修剪（默认 `true`；服务异常自动回退原文） |
-| `RTK_WEB_HOST` / `RTK_WEB_PORT` | rtk-web 地址（默认 `192.168.30.181:8787`） |
+| `RTK_WEB_HOST` / `RTK_WEB_PORT` | rtk-web 地址（必须自行配置；留空则跳过修剪） |
 | `RTK_WEB_MODE` | 压缩模式：`auto`（默认，激进有损）/ `chain`（固定链） |
 | `RTK_WEB_FORMAT` | 请求格式（默认 `term`） |
 | `RTK_WEB_TIMEOUT` / `RTK_WEB_RETRY_SECONDS` | 请求超时秒数（默认 10）/ 失败后熔断秒数（默认 60） |

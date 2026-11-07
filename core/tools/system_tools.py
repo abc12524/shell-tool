@@ -157,13 +157,20 @@ _RTK_WEB_DOWN_UNTIL = 0.0
 
 
 def _rtk_web_base_url() -> str:
-    """按 RTK_WEB_HOST / RTK_WEB_PORT 拼服务地址，兼容 host 自带 scheme/port。"""
+    """按 RTK_WEB_HOST / RTK_WEB_PORT 拼服务地址，兼容 host 自带 scheme/port。
+
+    未配置 host / port 时返回空字符串，调用方跳过修剪。
+    """
     host = config.RTK_WEB_HOST.strip()
+    if not host:
+        return ''
     if '://' not in host:
         host = f'http://{host}'
     parts = urllib.parse.urlsplit(host)
     netloc = parts.netloc
     if parts.port is None:
+        if not config.RTK_WEB_PORT:
+            return ''
         netloc = f'{netloc}:{config.RTK_WEB_PORT}'
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path.rstrip('/'), '', ''))
 
@@ -191,6 +198,10 @@ def _trim_with_rtk_web(text: str):
     if time.monotonic() < _RTK_WEB_DOWN_UNTIL:
         return None
 
+    base_url = _rtk_web_base_url()
+    if not base_url:
+        return None
+
     payload = text.encode('utf-8')
     if len(payload) > _RTK_WEB_MAX_BYTES:
         return None
@@ -203,7 +214,7 @@ def _trim_with_rtk_web(text: str):
             'charset': 'utf-8',
         })
         request = urllib.request.Request(
-            f'{_rtk_web_base_url()}/api/compress?{query}',
+            f'{base_url}/api/compress?{query}',
             data=payload,
             headers={'Content-Type': 'text/plain; charset=utf-8'},
             method='POST',

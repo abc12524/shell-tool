@@ -66,8 +66,10 @@ LLM_WEB_SEARCH = os.environ.get('LLM_WEB_SEARCH', 'false') in ('1', 'true', 'Tru
 # execute_system_command 的 bash / PowerShell 输出先交给 rtk-web 压缩；
 # 服务不可达、超时、4xx/5xx 或返回异常时静默回退原始输出。
 RTK_WEB_ENABLED = os.environ.get('RTK_WEB_ENABLED', 'true') in ('1', 'true', 'True', 'yes')
-RTK_WEB_HOST = (os.environ.get('RTK_WEB_HOST', '192.168.30.181') or '192.168.30.181').strip()
-RTK_WEB_PORT = int(os.environ.get('RTK_WEB_PORT', '8787') or '8787')
+# 地址必须在 .env 中显式配置；留空则不修剪输出（不回退任何内置地址）
+RTK_WEB_HOST = (os.environ.get('RTK_WEB_HOST', '') or '').strip()
+_rtk_web_port = (os.environ.get('RTK_WEB_PORT', '') or '').strip()
+RTK_WEB_PORT = int(_rtk_web_port) if _rtk_web_port else 0
 # auto=激进有损（默认，省得多）/ chain=固定链（可预期）
 RTK_WEB_MODE = (os.environ.get('RTK_WEB_MODE', 'auto') or 'auto').strip().lower()
 if RTK_WEB_MODE not in ('auto', 'chain'):
