@@ -150,18 +150,18 @@ def _decode_output(data: bytes) -> str:
     return data.decode(sys_enc, errors='replace').strip()
 
 
-# rtk-web 请求体上限（服务端 RTK_WEB_MAX_BODY 默认 10 MiB）；过大时直接跳过修剪
-_RTK_WEB_MAX_BYTES = 9 * 1024 * 1024
+# 输出修剪请求体上限（后端 rtk-web 的 RTK_WEB_MAX_BODY 默认 10 MiB）；过大时直接跳过修剪
+_OUTPUT_TRIM_MAX_BYTES = 9 * 1024 * 1024
 # 服务失败后的熔断截止时间（monotonic），避免服务宕机时每条命令都卡超时
-_RTK_WEB_DOWN_UNTIL = 0.0
+_OUTPUT_TRIM_DOWN_UNTIL = 0.0
 
 
-def _rtk_web_base_url() -> str:
-    """按 RTK_WEB_HOST / RTK_WEB_PORT 拼服务地址，兼容 host 自带 scheme/port。
+def _output_trim_base_url() -> str:
+    """按 OUTPUT_TRIM_HOST / OUTPUT_TRIM_PORT 拼服务地址，兼容 host 自带 scheme/port。
 
     未配置 host / port 时返回空字符串，调用方跳过修剪。
     """
-    host = config.RTK_WEB_HOST.strip()
+    host = config.OUTPUT_TRIM_HOST.strip()
     if not host:
         return ''
     if '://' not in host:
@@ -169,9 +169,9 @@ def _rtk_web_base_url() -> str:
     parts = urllib.parse.urlsplit(host)
     netloc = parts.netloc
     if parts.port is None:
-        if not config.RTK_WEB_PORT:
+        if not config.OUTPUT_TRIM_PORT:
             return ''
-        netloc = f'{netloc}:{config.RTK_WEB_PORT}'
+        netloc = f'{netloc}:{config.OUTPUT_TRIM_PORT}'
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path.rstrip('/'), '', ''))
 
 
@@ -186,30 +186,30 @@ def _header_number(headers, name: str, default):
         return default
 
 
-def _trim_with_rtk_web(text: str):
-    """把命令输出交给 rtk-web 压缩。
+def _trim_output(text: str):
+    """把命令输出交给输出修剪服务（后端用 rtk-web 实现）压缩。
 
     成功返回 (压缩后文本, 统计)；服务不可达、超时、非 2xx、解码失败或
     压缩后不更短时返回 None，调用方直接使用原始输出。
     """
-    global _RTK_WEB_DOWN_UNTIL
-    if not config.RTK_WEB_ENABLED or not text:
+    global _OUTPUT_TRIM_DOWN_UNTIL
+    if not config.OUTPUT_TRIM_ENABLED or not text:
         return None
-    if time.monotonic() < _RTK_WEB_DOWN_UNTIL:
+    if time.monotonic() < _OUTPUT_TRIM_DOWN_UNTIL:
         return None
 
-    base_url = _rtk_web_base_url()
+    base_url = _output_trim_base_url()
     if not base_url:
         return None
 
     payload = text.encode('utf-8')
-    if len(payload) > _RTK_WEB_MAX_BYTES:
+    if len(payload) > _OUTPUT_TRIM_MAX_BYTES:
         return None
 
     try:
         query = urllib.parse.urlencode({
-            'format': config.RTK_WEB_FORMAT,
-            'mode': config.RTK_WEB_MODE,
+            'format': config.OUTPUT_TRIM_FORMAT,
+            'mode': config.OUTPUT_TRIM_MODE,
             'lossless': 'false',
             'charset': 'utf-8',
         })
@@ -219,15 +219,15 @@ def _trim_with_rtk_web(text: str):
             headers={'Content-Type': 'text/plain; charset=utf-8'},
             method='POST',
         )
-        with urllib.request.urlopen(request, timeout=config.RTK_WEB_TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=config.OUTPUT_TRIM_TIMEOUT) as response:
             body = response.read()
             headers = response.headers
     except Exception:
-        if config.RTK_WEB_RETRY_SECONDS > 0:
-            _RTK_WEB_DOWN_UNTIL = time.monotonic() + config.RTK_WEB_RETRY_SECONDS
+        if config.OUTPUT_TRIM_RETRY_SECONDS > 0:
+            _OUTPUT_TRIM_DOWN_UNTIL = time.monotonic() + config.OUTPUT_TRIM_RETRY_SECONDS
         return None
 
-    _RTK_WEB_DOWN_UNTIL = 0.0
+    _OUTPUT_TRIM_DOWN_UNTIL = 0.0
     try:
         trimmed = body.decode('utf-8')
     except UnicodeDecodeError:
@@ -275,15 +275,15 @@ def execute_system_command(command: str) -> str:
         else:
             output = "命令执行成功（无输出）"
 
-        # 先过 rtk-web 修剪，再按字符上限截断；服务异常时保留原始输出
-        compression = None
+        # 先过输出修剪服务，再按字符上限截断；服务异常时保留原始输出
+        trim_info = None
         if stdout or stderr:
             try:
-                trimmed = _trim_with_rtk_web(output)
+                trimmed = _trim_output(output)
             except Exception:
                 trimmed = None
             if trimmed:
-                output, compression = trimmed
+                output, trim_info = trimmed
 
         # 限制输出长度，避免 token 过大
         max_length = 6000
@@ -297,8 +297,8 @@ def execute_system_command(command: str) -> str:
             "exit_code": returncode,
             "truncated": truncated,
         }
-        if compression:
-            result["compression"] = compression
+        if trim_info:
+            result["trim"] = trim_info
         return ok(result)
     except subprocess.TimeoutExpired:
         return error("命令执行超时（1小时）", code="timeout")
