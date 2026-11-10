@@ -120,6 +120,7 @@ cp .env.example .env
 | `OUTPUT_TRIM_MODE` | 压缩模式：`auto`（默认，激进有损）/ `chain`（固定链） |
 | `OUTPUT_TRIM_FORMAT` | 请求格式（默认 `term`） |
 | `OUTPUT_TRIM_TIMEOUT` / `OUTPUT_TRIM_RETRY_SECONDS` | 请求超时秒数（默认 10）/ 失败后熔断秒数（默认 60） |
+| `BALANCE_URL` | 余额查询地址（自建网关，默认 `https://192.168.30.181:8083/api/balance`；无需 API Key，留空则不查询） |
 | `DB_ONLINE` | 在线 MySQL 同步开关：`true`=开启同步（默认 true；未配置或连接失败则仅用 SQLite），`false`=关闭 |
 | `SQLITE_DB_PATH` | 本地 SQLite 文件路径（唯一读写源，默认 `data/shell_tool.db`） |
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | 在线 MySQL（同步副本）连接信息 |
@@ -144,8 +145,8 @@ LLM_USER_AGENT=shell-tool/1.0
 
 - `DEEPSEEK_API_TYPE`：`chat` 走 Chat Completions（OpenAI 兼容网关）；`responses`（默认）走 DeepSeek 官方 Responses API。
   Chat 模式下服务端内置 `web_search`（`LLM_WEB_SEARCH`）不生效。
-- `LLM_PROVIDER=opencode-go`：启用 OpenCode Go 计费口径（美元、UTC 峰谷 01:00-04:00 / 06:00-10:00，无余额接口）；
-  留空时按 `DEEPSEEK_BASE_URL` 自动推断。
+- `LLM_PROVIDER=opencode-go`：启用 OpenCode Go 计费口径（美元、UTC 峰谷 01:00-04:00 / 06:00-10:00），
+  且不显示余额（余额统一走 `BALANCE_URL`，仅非 OpenCode Go 查询）。留空时按 `DEEPSEEK_BASE_URL` 自动推断。
 - `LLM_SESSION_HEADER` / `LLM_USER_AGENT`：OpenCode Go 建议客户端以自有 UA 标识、并按会话稳定携带 session 头，
   以优化路由与前缀缓存；留空时 OpenCode 系会自动发送 `x-opencode-session`。
 

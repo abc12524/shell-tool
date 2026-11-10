@@ -82,6 +82,10 @@ OUTPUT_TRIM_TIMEOUT = max(0.5, float(os.environ.get('OUTPUT_TRIM_TIMEOUT', '10')
 # 请求失败后暂停调用多少秒，避免服务宕机时每条命令都等超时
 OUTPUT_TRIM_RETRY_SECONDS = max(0.0, float(os.environ.get('OUTPUT_TRIM_RETRY_SECONDS', '60') or '60'))
 
+# ===== 账户余额查询 =====
+# 余额统一取自自建网关（内网 HTTPS，自签名证书），不再用 API Key 查官方接口；留空则不查询
+BALANCE_URL = (os.environ.get('BALANCE_URL', 'https://192.168.30.181:8083/api/balance') or '').strip()
+
 # ===== 调试 =====
 # 打印每轮发送给 API 的消息序列 hash（role:md5），默认关闭
 DEBUG_SEND_SEQ = os.environ.get('DEBUG_SEND_SEQ', '0') in ('1', 'true', 'True')

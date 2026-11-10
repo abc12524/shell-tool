@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """DeepSeek 计费：工作日峰谷单价、费用计算与账户余额实时查询"""
+import warnings
 from datetime import datetime, timedelta, timezone
 
 import requests
+import urllib3
 
 from . import config
 
@@ -106,23 +108,29 @@ def compute_cost(usage, model=None, when=None):
 
 
 def fetch_balance():
-    """实时查询账户余额，返回 (金额字符串, 币种) 或 (None, None)。
+    """查询账户余额，返回 (金额字符串, 币种) 或 (None, None)。
 
-    OpenCode Go 无公开余额接口，直接返回 (None, None)。
+    统一走自建网关的 /api/balance（内网 HTTPS 自签名证书，无需 API Key）；
+    OpenCode Go 不显示余额，直接返回 (None, None)。
     """
-    if is_opencode_go():
+    if is_opencode_go() or not config.BALANCE_URL:
         return None, None
+    url = config.BALANCE_URL
     try:
-        r = requests.get(
-            f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/user/balance",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
-            },
-            timeout=10,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', urllib3.exceptions.InsecureRequestWarning)
+            r = requests.get(
+                url,
+                headers={"Accept": "application/json"},
+                timeout=10,
+                verify=False,
+            )
         r.raise_for_status()
-        info = (r.json().get("balance_infos") or [{}])[0]
+        data = r.json()
+        # 兼容网关信封 {"status":"ok","result":{...}} 与裸 {"balance_infos":[...]}
+        if isinstance(data.get("result"), dict):
+            data = data["result"]
+        info = (data.get("balance_infos") or [{}])[0]
         return info.get("total_balance"), info.get("currency")
     except Exception:
         return None, None

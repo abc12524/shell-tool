@@ -658,9 +658,11 @@ def ev_usage(model, peak, hit, miss, out, costs, total, balance, currency):
         tail = Text("  ")
         tail.append(billing.provider(), style="kv.key")
         if balance is not None:
+            # 余额币种以接口返回为准（可能与计费币种不同）
+            sym = "$" if (currency or "").upper() == "USD" else "¥"
             tail.append("   💰 余额 ", style="muted")
-            tail.append(f"{symbol}{balance}", style="ok")
-        else:
+            tail.append(f"{sym}{balance}", style="ok")
+        elif not billing.is_opencode_go():
             tail.append("   💰 余额 查询失败", style="muted")
         console.print(tail)
     _ev("usage", payload, t)
