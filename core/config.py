@@ -83,8 +83,10 @@ OUTPUT_TRIM_TIMEOUT = max(0.5, float(os.environ.get('OUTPUT_TRIM_TIMEOUT', '10')
 OUTPUT_TRIM_RETRY_SECONDS = max(0.0, float(os.environ.get('OUTPUT_TRIM_RETRY_SECONDS', '60') or '60'))
 
 # ===== 账户余额查询 =====
-# 余额统一取自自建网关（内网 HTTPS，自签名证书），不再用 API Key 查官方接口；留空则不查询
-BALANCE_URL = (os.environ.get('BALANCE_URL', 'https://192.168.30.181:8083/api/balance') or '').strip()
+# 留空 = 用 DEEPSEEK_API_KEY 查官方 /user/balance；
+# 配置后改用自建网关（此地址作为基址，自动拼 /api/balance，无需 Key）
+# 示例：BALANCE_URL=https://192.168.30.181:8083/
+BALANCE_URL = (os.environ.get('BALANCE_URL', '') or '').strip()
 
 # ===== 调试 =====
 # 打印每轮发送给 API 的消息序列 hash（role:md5），默认关闭

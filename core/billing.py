@@ -107,29 +107,60 @@ def compute_cost(usage, model=None, when=None):
     return sum(costs.values()), is_peak(when), costs
 
 
+def balance_url():
+    """余额网关地址：BALANCE_URL 作为基址拼接 /api/balance；未配置返回空串。"""
+    base = (config.BALANCE_URL or '').strip().rstrip('/')
+    if not base:
+        return ''
+    if base.endswith('/api/balance'):
+        return base
+    return base + '/api/balance'
+
+
+def _get_balance_json(url):
+    """GET 余额接口并解析 JSON（内网自签名证书，关闭校验并静默告警）。"""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', urllib3.exceptions.InsecureRequestWarning)
+        r = requests.get(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=10,
+            verify=False,
+        )
+    r.raise_for_status()
+    return r.json()
+
+
 def fetch_balance():
     """查询账户余额，返回 (金额字符串, 币种) 或 (None, None)。
 
-    统一走自建网关的 /api/balance（内网 HTTPS 自签名证书，无需 API Key）；
+    两种模式：
+      - 未配置 BALANCE_URL：用 DEEPSEEK_API_KEY 查官方 {DEEPSEEK_BASE_URL}/user/balance
+      - 配置了 BALANCE_URL：查自建网关 {BALANCE_URL}/api/balance（无需 Key）
     OpenCode Go 不显示余额，直接返回 (None, None)。
     """
-    if is_opencode_go() or not config.BALANCE_URL:
+    if is_opencode_go():
         return None, None
-    url = config.BALANCE_URL
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', urllib3.exceptions.InsecureRequestWarning)
+        url = balance_url()
+        if url:
+            data = _get_balance_json(url)
+            # 兼容网关信封 {"status":"ok","result":{...}} 与裸 {"balance_infos":[...]}
+            if isinstance(data.get("result"), dict):
+                data = data["result"]
+        else:
+            if not config.DEEPSEEK_API_KEY:
+                return None, None
             r = requests.get(
-                url,
-                headers={"Accept": "application/json"},
+                f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/user/balance",
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
+                },
                 timeout=10,
-                verify=False,
             )
-        r.raise_for_status()
-        data = r.json()
-        # 兼容网关信封 {"status":"ok","result":{...}} 与裸 {"balance_infos":[...]}
-        if isinstance(data.get("result"), dict):
-            data = data["result"]
+            r.raise_for_status()
+            data = r.json()
         info = (data.get("balance_infos") or [{}])[0]
         return info.get("total_balance"), info.get("currency")
     except Exception:

@@ -120,7 +120,7 @@ cp .env.example .env
 | `OUTPUT_TRIM_MODE` | 压缩模式：`auto`（默认，激进有损）/ `chain`（固定链） |
 | `OUTPUT_TRIM_FORMAT` | 请求格式（默认 `term`） |
 | `OUTPUT_TRIM_TIMEOUT` / `OUTPUT_TRIM_RETRY_SECONDS` | 请求超时秒数（默认 10）/ 失败后熔断秒数（默认 60） |
-| `BALANCE_URL` | 余额查询地址（自建网关，默认 `https://192.168.30.181:8083/api/balance`；无需 API Key，留空则不查询） |
+| `BALANCE_URL` | 余额查询地址：留空用 `DEEPSEEK_API_KEY` 查官方 `/user/balance`；配置后作为基址自动拼 `/api/balance`（如 `https://192.168.30.181:8083/`，无需 Key） |
 | `DB_ONLINE` | 在线 MySQL 同步开关：`true`=开启同步（默认 true；未配置或连接失败则仅用 SQLite），`false`=关闭 |
 | `SQLITE_DB_PATH` | 本地 SQLite 文件路径（唯一读写源，默认 `data/shell_tool.db`） |
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | 在线 MySQL（同步副本）连接信息 |
