@@ -438,10 +438,20 @@ async def stream_responses_api(messages, session_id=None):
             if idx in fc_by_idx:
                 fc_by_idx[idx]['arguments'] += ev.get('delta', '') or ''
 
-        elif ctype == 'response.reasoning_text.delta':
+        elif ctype in ('response.reasoning_text.delta', 'response.reasoning_summary_text.delta'):
+            # reasoning_text：DeepSeek 官方 Responses API 输出思维链正文；
+            # reasoning_summary_text：LiteLLM 等网关把思维链放在 reasoning.summary 里（摘要文本）。
+            # 两者语义相同（模型的思考过程），统一累积并流式渲染。
             delta = ev.get('delta', '') or ''
             if delta:
                 reasoning += delta
+                live_reasoning.feed(delta)
+
+        elif ctype in ('response.reasoning_text.done', 'response.reasoning_summary_text.done'):
+            # 兜底：个别网关不逐字发送 delta，只在 done 里给完整文本
+            delta = ev.get('text', '') or ''
+            if delta and not reasoning:
+                reasoning = delta
                 live_reasoning.feed(delta)
 
         elif ctype == 'response.output_text.delta':
@@ -488,13 +498,16 @@ async def stream_responses_api(messages, session_id=None):
 
 
 def _delta_reasoning(delta):
-    """读取思考增量：DeepSeek 返回 reasoning_content；兼容 dict 与对象两种承载"""
+    """读取思考增量：DeepSeek 返回 reasoning_content，部分网关（LiteLLM / vLLM / SGLang）
+    返回 reasoning；兼容 dict 与对象两种承载"""
     if isinstance(delta, dict):
-        return delta.get('reasoning_content') or ''
+        return delta.get('reasoning_content') or delta.get('reasoning') or ''
     value = getattr(delta, 'reasoning_content', None)
     if value is None:
+        value = getattr(delta, 'reasoning', None)
+    if value is None:
         extra = getattr(delta, 'model_extra', None) or {}
-        value = extra.get('reasoning_content')
+        value = extra.get('reasoning_content') or extra.get('reasoning')
     return value or ''
 
 
