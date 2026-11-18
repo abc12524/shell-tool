@@ -62,14 +62,13 @@ MAX_TOOL_ROUNDS = int(os.environ.get('MAX_TOOL_ROUNDS', '6'))
 # false=关闭，模型不再触发服务端网页搜索（默认）；true=向模型提供内置联网搜索。
 LLM_WEB_SEARCH = os.environ.get('LLM_WEB_SEARCH', 'false') in ('1', 'true', 'True', 'yes')
 
-# ===== 命令输出修剪（后端 rtk-web 实现）=====
-# execute_system_command 的 bash / PowerShell 输出先交给输出修剪服务压缩；
-# 服务不可达、超时、4xx/5xx 或返回异常时静默回退原始输出。
+# ===== 命令输出简化（trim）=====
+# 命令仍由本进程执行，只把文本结果交给「简化技能」加工后取回；本进程只做调用与降级：
+# 技能未安装 / 抛异常 / 压缩后不更短时静默回退原始输出。
+# 服务地址等运行配置归技能自身（skill/<名>/config.json 的 RTK_WEB_HOST），这里不重复配。
 OUTPUT_TRIM_ENABLED = os.environ.get('OUTPUT_TRIM_ENABLED', 'true') in ('1', 'true', 'True', 'yes')
-# 地址必须在 .env 中显式配置；留空则不修剪输出（不回退任何内置地址）
-OUTPUT_TRIM_HOST = (os.environ.get('OUTPUT_TRIM_HOST', '') or '').strip()
-_output_trim_port = (os.environ.get('OUTPUT_TRIM_PORT', '') or '').strip()
-OUTPUT_TRIM_PORT = int(_output_trim_port) if _output_trim_port else 0
+# 提供 trim() 扩展函数的技能名（skill/ 目录下已安装者）；没装就不裁剪
+OUTPUT_TRIM_SKILL = (os.environ.get('OUTPUT_TRIM_SKILL', 'rtk_web') or 'rtk_web').strip()
 # auto=激进有损（默认，省得多）/ chain=固定链（可预期）
 OUTPUT_TRIM_MODE = (os.environ.get('OUTPUT_TRIM_MODE', 'auto') or 'auto').strip().lower()
 if OUTPUT_TRIM_MODE not in ('auto', 'chain'):

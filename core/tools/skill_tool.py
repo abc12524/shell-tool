@@ -339,6 +339,23 @@ def _load_run(meta):
     return run
 
 
+def get_module(name):
+    """按名称取已注册技能的模块对象，不执行 run、不套信封。
+
+    给宿主程序当扩展点用（例：output_trim 直接调技能里的 trim() 扩展函数）；
+    未注册或导入失败返回 None，调用方按"能力不存在"处理即可。
+    """
+    meta = REGISTRY.get(name)
+    if not meta:
+        return None
+    if config.PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, config.PROJECT_ROOT)
+    try:
+        return importlib.import_module(meta["module"])
+    except Exception:
+        return None
+
+
 def execute(name, arguments):
     """执行指定 skill，返回规范信封字符串。"""
     meta = REGISTRY.get(name)
