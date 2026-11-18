@@ -30,7 +30,7 @@ _DOWN_UNTIL = 0.0
 # 报错行、首行、尾段都已保住。所以只标注 lossy，不再回退原文：
 # 回退等于把「按预算选过的 6000 字符」换成「从头截断的 6000 字符」，更差。
 _LOSS_HINT = re.compile(
-    r'lines elided|\d+ chars truncated|^\s*\.\.\. \(\d+ (?:more|filtered)',
+    r'lines elided|\[\+\d+ chars\]|\d+ chars truncated|^\s*\.\.\. \(\d+ (?:more|filtered)',
     re.MULTILINE,
 )
 
