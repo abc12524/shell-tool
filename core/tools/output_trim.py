@@ -22,13 +22,17 @@ MAX_BYTES = 9 * 1024 * 1024
 # 连续失败后的熔断截止时间（monotonic）
 _DOWN_UNTIL = 0.0
 
-# rtk 的过滤器丢了内容时只留一行计数，条目本身不进输出：
-#   ls 超过 50 项        -> "... (12 more)"
-#   ls 命中噪音目录/解析失败 -> "... (3 filtered)"
-#   "... (2 more, 1 filtered)"
-# 这类结果是少了东西的，压缩收益再大也不能用 —— 宁可退回原文。
-# 判定只认行首的独立提示行，避免误伤正文里恰好出现的括号。
-_LOSS_HINT = re.compile(r'^\s*\.\.\. \(\d+ (?:more|filtered)', re.MULTILINE)
+# 压缩结果里出现这些标记，说明有条目没进输出：
+#   ls 过滤器  -> "... (12 more)" / "... (3 filtered)"
+#   cap 省略   -> "[… 33 lines elided …]"
+#   budget 裁剪-> "[… 33 lines elided …]" / "[+120 chars]"
+# 这不代表结果不能用 —— 宿主带了 max_chars，服务端就是按预算裁的，
+# 报错行、首行、尾段都已保住。所以只标注 lossy，不再回退原文：
+# 回退等于把「按预算选过的 6000 字符」换成「从头截断的 6000 字符」，更差。
+_LOSS_HINT = re.compile(
+    r'lines elided|\d+ chars truncated|^\s*\.\.\. \(\d+ (?:more|filtered)',
+    re.MULTILINE,
+)
 
 
 def _impl():
@@ -62,6 +66,9 @@ def trim_text(text):
         'format': config.OUTPUT_TRIM_FORMAT,
         'mode': config.OUTPUT_TRIM_MODE,
         'timeout': config.OUTPUT_TRIM_TIMEOUT,
+        # 让服务端知道宿主的截断口径：它在预算内按重要性裁，
+        # 比我们拿到结果后砍尾巴更省也更准。
+        'max_chars': config.OUTPUT_TRIM_MAX_CHARS,
     }
 
     try:
@@ -74,15 +81,13 @@ def trim_text(text):
     _DOWN_UNTIL = 0.0
     if not isinstance(trimmed, str) or not trimmed or len(trimmed) >= len(text):
         return None
-    if _LOSS_HINT.search(trimmed):
-        # 压缩结果带折叠计数 = 有条目被吞掉（且 rtk-web 里 tee 恢复不可用），
-        # 这条信息比省下的 token 值钱，直接用原文
-        return None
     before = len(text.encode('utf-8'))
     after = len(trimmed.encode('utf-8'))
     return trimmed, {
         'saved_percent': round((before - after) / before * 100, 1),
         'bytes_before': before,
         'bytes_after': after,
+        # 结果被裁过（省略了中间/单行截断），调用方可据此提示模型"要看全就精确化命令"
+        'lossy': bool(_LOSS_HINT.search(trimmed)),
         'via': 'skill:' + config.OUTPUT_TRIM_SKILL,
     }

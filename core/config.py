@@ -80,6 +80,12 @@ if OUTPUT_TRIM_FORMAT not in ('term', 'json', 'web', 'matches', 'lockfile', 'aut
 OUTPUT_TRIM_TIMEOUT = max(0.5, float(os.environ.get('OUTPUT_TRIM_TIMEOUT', '10') or '10'))
 # 请求失败后暂停调用多少秒，避免服务宕机时每条命令都等超时
 OUTPUT_TRIM_RETRY_SECONDS = max(0.0, float(os.environ.get('OUTPUT_TRIM_RETRY_SECONDS', '60') or '60'))
+# 交给简化服务的字符预算：与 execute_system_command 的 6000 截断对齐。
+# 服务端按预算裁 —— 保首行 / 报错行 / 尾段，剩余预算等间隔采样中间行，
+# 因此宿主那道截断退化为兜底，正常路径不会触发（也就不会砍掉尾部报错）。
+OUTPUT_TRIM_MAX_CHARS = int(os.environ.get('OUTPUT_TRIM_MAX_CHARS', '6000') or '6000')
+if OUTPUT_TRIM_MAX_CHARS < 200:
+    OUTPUT_TRIM_MAX_CHARS = 6000
 
 # ===== 账户余额查询 =====
 # 留空 = 用 DEEPSEEK_API_KEY 查官方 /user/balance；

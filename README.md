@@ -116,10 +116,10 @@ cp .env.example .env
 | `MAX_TOOL_ROUNDS` | 工具调用最大轮数（默认 6） |
 | `LLM_WEB_SEARCH` | LLM 内置联网搜索（DeepSeek Responses API 自带 web_search）开关：`false`=关闭（默认），`true`=开启 |
 | `OUTPUT_TRIM_ENABLED` | `execute_system_command` 输出是否经输出修剪服务（后端 rtk-web）修剪（默认 `true`；服务异常自动回退原文） |
-| `OUTPUT_TRIM_HOST` / `OUTPUT_TRIM_PORT` | 输出修剪服务地址（必须自行配置；留空则跳过修剪） |
 | `OUTPUT_TRIM_MODE` | 压缩模式：`auto`（默认，激进有损）/ `chain`（固定链） |
 | `OUTPUT_TRIM_FORMAT` | 请求格式（默认 `term`） |
 | `OUTPUT_TRIM_TIMEOUT` / `OUTPUT_TRIM_RETRY_SECONDS` | 请求超时秒数（默认 10）/ 失败后熔断秒数（默认 60） |
+| `OUTPUT_TRIM_MAX_CHARS` | 交给服务的字符预算（默认 6000）：服务端按预算裁，保首行 / 报错行 / 尾段，其余等间隔采样 |
 | `BALANCE_URL` | 余额查询地址：留空用 `DEEPSEEK_API_KEY` 查官方 `/user/balance`；配置后作为基址自动拼 `/api/balance`（如 `https://192.168.30.181:8083/`，无需 Key） |
 | `DB_ONLINE` | 在线 MySQL 同步开关：`true`=开启同步（默认 true；未配置或连接失败则仅用 SQLite），`false`=关闭 |
 | `SQLITE_DB_PATH` | 本地 SQLite 文件路径（唯一读写源，默认 `data/shell_tool.db`） |
@@ -266,6 +266,8 @@ curl http://localhost:8000/health
 模型面向的原生工具只有 `get_system_info`、`execute_system_command`、`skill` 三个；其中 `skill` 负责列出 / 查看用法 / 执行 `skill/` 目录下的脚本（当前为空，可从远程仓库安装），脚本在进程内执行，新增脚本即自动注册。
 
 `execute_system_command` 的 bash / PowerShell 输出在返回前会先交给输出修剪服务（后端用 rtk-web 实现，`OUTPUT_TRIM_*` 可配置）修剪；服务不可达、超时或返回异常时静默使用原始输出，不影响命令本身的退出码与结果。
+
+修剪请求带 `max_chars`（`OUTPUT_TRIM_MAX_CHARS`，默认 6000），服务端按预算裁：首行、命中 `error` / `warn` / `fail` / `panic` 等关键字的行、尾段优先保留，剩余预算在中间行等间隔采样，每段空缺都留 `[… N lines elided …]`。因此 `system_tools` 里那道 6000 字符截断只是兜底——正常路径不会触发，也就不会把尾部报错切掉。结果被裁过时 `trim` 统计里带 `lossy: true`。
 
 ## 安全说明
 

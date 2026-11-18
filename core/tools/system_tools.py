@@ -183,7 +183,8 @@ def execute_system_command(command: str) -> str:
             if trimmed:
                 output, trim_info = trimmed
 
-        # 限制输出长度，避免 token 过大
+        # 兜底：正常路径由 trim 服务按 OUTPUT_TRIM_MAX_CHARS 裁好（≤ 预算且保住
+        # 报错行），走不到这里；服务不可用 / 跳过修剪时才靠它防止爆上下文。
         max_length = 6000
         truncated = False
         if len(output) > max_length:
