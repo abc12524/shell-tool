@@ -12,6 +12,7 @@
 技能未安装、未导出 trim、抛异常、或压缩后不更短 → 静默用原文，简化不是单点故障；
 抛异常时按 OUTPUT_TRIM_RETRY_SECONDS 熔断，避免服务挂了每条命令都等超时。
 """
+import re
 import time
 
 from .. import config
@@ -20,6 +21,14 @@ from .. import config
 MAX_BYTES = 9 * 1024 * 1024
 # 连续失败后的熔断截止时间（monotonic）
 _DOWN_UNTIL = 0.0
+
+# rtk 的过滤器丢了内容时只留一行计数，条目本身不进输出：
+#   ls 超过 50 项        -> "... (12 more)"
+#   ls 命中噪音目录/解析失败 -> "... (3 filtered)"
+#   "... (2 more, 1 filtered)"
+# 这类结果是少了东西的，压缩收益再大也不能用 —— 宁可退回原文。
+# 判定只认行首的独立提示行，避免误伤正文里恰好出现的括号。
+_LOSS_HINT = re.compile(r'^\s*\.\.\. \(\d+ (?:more|filtered)', re.MULTILINE)
 
 
 def _impl():
@@ -64,6 +73,10 @@ def trim_text(text):
 
     _DOWN_UNTIL = 0.0
     if not isinstance(trimmed, str) or not trimmed or len(trimmed) >= len(text):
+        return None
+    if _LOSS_HINT.search(trimmed):
+        # 压缩结果带折叠计数 = 有条目被吞掉（且 rtk-web 里 tee 恢复不可用），
+        # 这条信息比省下的 token 值钱，直接用原文
         return None
     before = len(text.encode('utf-8'))
     after = len(trimmed.encode('utf-8'))
