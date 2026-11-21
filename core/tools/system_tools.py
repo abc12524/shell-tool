@@ -11,6 +11,11 @@ import time
 
 from .envelope import ok, error
 from .output_trim import trim_text
+from .. import config
+
+# 截断预算里头部所占比例，其余留给尾部。tail -n / journalctl / grep -A 这类命令
+# 的关键信息在末尾，纯头部截断会把最新的报错砍掉
+_OUTPUT_HEAD_RATIO = 0.6
 
 
 def get_system_info():
@@ -148,6 +153,44 @@ def _decode_output(data: bytes) -> str:
     return data.decode(sys_enc, errors='replace').strip()
 
 
+def _truncate_keep_ends(text: str, limit: int):
+    """超长输出保留头尾、省略中间，返回 (新文本, 是否截断)。
+
+    纯 text[:limit] 截断会丢掉尾部，而 tail -n / journalctl / grep -A 这类命令的
+    关键信息恰在末尾——线上真实案例：tail -n 150 xxx.log 的最新报错被砍掉。
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text, False
+
+    # 上限太小时保头保尾没有意义，退化为头部截断 + 极短标记，避免预算变成负数
+    if limit < 200:
+        tag = f"...[{len(text) - limit}字省略]"
+        return text[:max(0, limit - len(tag))] + tag, True
+
+    budget = limit - 80  # 给省略标记留位置
+    head_len = int(budget * _OUTPUT_HEAD_RATIO)
+    tail_len = budget - head_len
+    head, tail = text[:head_len], text[-tail_len:]
+
+    # 向行边界收口，避免把一行切成两半
+    cut = head.rfind('\n')
+    if cut > head_len * 0.7:
+        head = head[:cut]
+    cut = tail.find('\n')
+    if 0 <= cut < tail_len * 0.3:
+        tail = tail[cut + 1:]
+
+    marker = f"\n... [中间省略 {len(text) - len(head) - len(tail)} 字符 / 原长度 {len(text)} 字符] ...\n"
+    result = head + marker + tail
+
+    # 标记长度估算偏差时兜底，确保不超过 limit
+    if len(result) > limit:
+        excess = len(result) - limit
+        head = head[:max(0, len(head) - excess)]
+        result = head + marker + tail
+    return result, True
+
+
 def execute_system_command(command: str) -> str:
     """执行系统命令并返回结果（跨平台支持）"""
     os_type = platform.system().lower()
@@ -176,20 +219,18 @@ def execute_system_command(command: str) -> str:
         else:
             output = "命令执行成功（无输出）"
 
-        # 输出简化交给工具侧（默认 rtk_web 技能 → rtk-web），失败静默用原文
+        # 输出简化交给工具侧（默认 rtk_web 技能 → rtk-web），失败静默用原文。
+        # 传 command 是为了分流：diff/JSON/源码这类内容走 chain 保真，其余 auto。
         trim_info = None
         if stdout or stderr:
-            trimmed = trim_text(output)
+            trimmed = trim_text(output, command)
             if trimmed:
                 output, trim_info = trimmed
 
         # 兜底：正常路径由 trim 服务按 OUTPUT_TRIM_MAX_CHARS 裁好（≤ 预算且保住
         # 报错行），走不到这里；服务不可用 / 跳过修剪时才靠它防止爆上下文。
-        max_length = 6000
-        truncated = False
-        if len(output) > max_length:
-            output = output[:max_length] + f"\n... (输出被截断，原长度 {len(output)} 字符)"
-            truncated = True
+        # 这里必须保头尾 —— 纯头部截断会把 tail -n 的最新报错砍掉。
+        output, truncated = _truncate_keep_ends(output, config.OUTPUT_TRIM_MAX_CHARS)
 
         result = {
             "output": output,

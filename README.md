@@ -114,9 +114,11 @@ cp .env.example .env
 | `LLM_SESSION_HEADER` | 会话标识请求头名：OpenCode Go 建议 `x-opencode-session`；留空时 OpenCode 系自动启用 |
 | `LLM_USER_AGENT` | 客户端 User-Agent 标识（OpenCode Go 建议用自有客户端名）；留空则不发该请求头 |
 | `MAX_TOOL_ROUNDS` | 工具调用最大轮数（默认 6） |
+| `MAX_API_ATTEMPTS` | LLM 请求遇到可重试错误（429 / 5xx / 网络中断）时的最大尝试次数（默认 4） |
 | `LLM_WEB_SEARCH` | LLM 内置联网搜索（DeepSeek Responses API 自带 web_search）开关：`false`=关闭（默认），`true`=开启 |
 | `OUTPUT_TRIM_ENABLED` | `execute_system_command` 输出是否经输出修剪服务（后端 rtk-web）修剪（默认 `true`；服务异常自动回退原文） |
-| `OUTPUT_TRIM_MODE` | 压缩模式：`auto`（默认，激进有损）/ `chain`（固定链） |
+| `OUTPUT_TRIM_MODE` | 压缩模式：`auto`（默认，按内容类型重写，省得多）/ `chain`（固定链，可预期）。实际模式由 `OUTPUT_TRIM_ROUTE` 按内容二次分配 |
+| `OUTPUT_TRIM_ROUTE` | 分流（仅 `MODE=auto` 时生效）：`chain_whitelist`（默认）让 diff / JSON / 源码 / 表格 / 文件列表 / 日志 / 配置等「重写即丢结论」的内容走 `chain`，其余仍用 `auto`；`off` 关闭分流 |
 | `OUTPUT_TRIM_FORMAT` | 请求格式（默认 `term`） |
 | `OUTPUT_TRIM_TIMEOUT` / `OUTPUT_TRIM_RETRY_SECONDS` | 请求超时秒数（默认 10）/ 失败后熔断秒数（默认 60） |
 | `OUTPUT_TRIM_MAX_CHARS` | 交给服务的字符预算（默认 6000）：服务端按预算裁，保首行 / 报错行 / 尾段，其余等间隔采样 |
@@ -267,7 +269,9 @@ curl http://localhost:8000/health
 
 `execute_system_command` 的 bash / PowerShell 输出在返回前会先交给输出修剪服务（后端用 rtk-web 实现，`OUTPUT_TRIM_*` 可配置）修剪；服务不可达、超时或返回异常时静默使用原始输出，不影响命令本身的退出码与结果。
 
-修剪请求带 `max_chars`（`OUTPUT_TRIM_MAX_CHARS`，默认 6000），服务端按预算裁：首行、命中 `error` / `warn` / `fail` / `panic` 等关键字的行、尾段优先保留，剩余预算在中间行等间隔采样，每段空缺都留 `[… N lines elided …]`。因此 `system_tools` 里那道 6000 字符截断只是兜底——正常路径不会触发，也就不会把尾部报错切掉。结果被裁过时 `trim` 统计里带 `lossy: true`。
+修剪请求带 `max_chars`（`OUTPUT_TRIM_MAX_CHARS`，默认 6000），服务端按预算裁：首行、命中 `error` / `warn` / `fail` / `panic` 等关键字的行、尾段优先保留，剩余预算在中间行等间隔采样，每段空缺都留 `[… N lines elided …]`。因此 `system_tools` 里那道截断只是兜底——正常路径不会触发；兜底本身也是保头尾（头 60% / 尾 40% + 中间省略标记），不会把 `tail -n` 的最新报错切掉。结果被裁过时 `trim` 统计里带 `lossy: true`。
+
+模式不直接取 `OUTPUT_TRIM_MODE`：默认按输出内容分流（`core/tools/output_route.py`）。`mode=auto` 会先识别内容类型再「换成另一种表示」——diff 被当成 grep 结果只剩文件头时间戳、JSON 被 `elided` 掏空、源码每 3 行删 3 行、`find` 输出按目录重排。所以 diff / JSON / 源码 / 表格 / 文件列表 / 日志 / 配置文件这些「重写即丢结论」的类型改走 `chain`（只做 ansi / progress / dedup / base64-elide / cap 无损裁剪），其余仍交给 `auto` 争取压缩率。判定以输出内容为主、命令前缀只作兜底，因为大量命令是 `ssh host 'a; b; c'` 拼接形式。`trim` 统计里的 `mode` 字段直接显示这次走了哪条。
 
 ## 安全说明
 

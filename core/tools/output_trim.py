@@ -5,17 +5,22 @@
 而是直接取已安装技能模块里导出的扩展函数：
 
     trim(text, **options) -> str     # 纯文本进、纯文本出；失败抛异常
-    options: format / mode / timeout，实现可忽略
+    options: format / mode / timeout / max_chars，实现可忽略
 
 宿主拿到的就是压缩后的字符串，不用再解一层 JSON，也不依赖技能约定。
 服务地址不在这里配 —— 归技能自己的 config.json（RTK_WEB_HOST）。
 技能未安装、未导出 trim、抛异常、或压缩后不更短 → 静默用原文，简化不是单点故障；
 抛异常时按 OUTPUT_TRIM_RETRY_SECONDS 熔断，避免服务挂了每条命令都等超时。
+
+mode 不是直接取配置：默认按输出内容分流（output_route.route_mode），
+「重写即丢结论」的类型（diff / JSON / 源码 / 表格 / 文件列表 / 日志 / 配置）走
+chain 保真，其余才交给 auto。见 core/tools/output_route.py 的实测背景。
 """
 import re
 import time
 
 from .. import config
+from .output_route import route_mode
 
 # 单次压缩的输入上限；超过就跳过（大文件压缩没性价比，也免得打爆对端）
 MAX_BYTES = 9 * 1024 * 1024
@@ -44,10 +49,12 @@ def _impl():
     return fn if callable(fn) else None
 
 
-def trim_text(text):
+def trim_text(text, command=''):
     """压缩一段命令输出；成功返回 (trimmed, stats)，跳过/失败返回 None。
 
-    stats = {saved_percent, bytes_before, bytes_after, via}
+    command 只用于分流判定（同一段文本来自 diff 还是构建日志，处理方式不同）；
+    传空串等于不做内容判定，走配置里的 OUTPUT_TRIM_MODE。
+    stats = {saved_percent, bytes_before, bytes_after, mode, lossy, via}
     """
     global _DOWN_UNTIL
     if not config.OUTPUT_TRIM_ENABLED or not text:
@@ -62,9 +69,10 @@ def trim_text(text):
         # 没装技能 = 不裁剪；这是配置缺失而非故障，不触发熔断
         return None
 
+    mode = route_mode(command, text)
     options = {
         'format': config.OUTPUT_TRIM_FORMAT,
-        'mode': config.OUTPUT_TRIM_MODE,
+        'mode': mode,
         'timeout': config.OUTPUT_TRIM_TIMEOUT,
         # 让服务端知道宿主的截断口径：它在预算内按重要性裁，
         # 比我们拿到结果后砍尾巴更省也更准。
@@ -87,6 +95,8 @@ def trim_text(text):
         'saved_percent': round((before - after) / before * 100, 1),
         'bytes_before': before,
         'bytes_after': after,
+        # 这次走的是哪条链路：chain 表示判定为保真内容，auto 表示按类型重写
+        'mode': mode,
         # 结果被裁过（省略了中间/单行截断），调用方可据此提示模型"要看全就精确化命令"
         'lossy': bool(_LOSS_HINT.search(trimmed)),
         'via': 'skill:' + config.OUTPUT_TRIM_SKILL,

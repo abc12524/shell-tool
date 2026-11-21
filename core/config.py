@@ -73,6 +73,15 @@ OUTPUT_TRIM_SKILL = (os.environ.get('OUTPUT_TRIM_SKILL', 'rtk_web') or 'rtk_web'
 OUTPUT_TRIM_MODE = (os.environ.get('OUTPUT_TRIM_MODE', 'auto') or 'auto').strip().lower()
 if OUTPUT_TRIM_MODE not in ('auto', 'chain'):
     OUTPUT_TRIM_MODE = 'auto'
+# 分流：仅在 OUTPUT_TRIM_MODE=auto 时生效（见 core/tools/output_route.py）。
+#   chain_whitelist（默认）= diff/JSON/源码/表格/文件列表/日志/配置等「重写即丢结论」
+#                            的内容走 chain 保真，其余交给 auto 争取压缩率
+#   off                    = 不分流，全部用 OUTPUT_TRIM_MODE
+# 起因：auto 会识别内容类型后重写——diff 只剩文件头时间戳、JSON 被 elided 掏空、
+# 源码每 3 行删 3 行。这些都是把结论本身删掉，不是「压得狠」。
+OUTPUT_TRIM_ROUTE = (os.environ.get('OUTPUT_TRIM_ROUTE', 'chain_whitelist') or '').strip().lower()
+if OUTPUT_TRIM_ROUTE not in ('chain_whitelist', 'off'):
+    OUTPUT_TRIM_ROUTE = 'chain_whitelist'
 # term / json / web / matches / lockfile / auto
 OUTPUT_TRIM_FORMAT = (os.environ.get('OUTPUT_TRIM_FORMAT', 'term') or 'term').strip().lower()
 if OUTPUT_TRIM_FORMAT not in ('term', 'json', 'web', 'matches', 'lockfile', 'auto'):
