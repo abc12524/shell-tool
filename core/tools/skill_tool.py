@@ -29,9 +29,11 @@ import sys
 from .envelope import ok, error
 from .. import config
 
-SKILL_DIR = os.path.join(config.PROJECT_ROOT, "skill")
+SKILL_DIR = config.SKILL_DIR
+# skill 包导入根（配置目录）：sys.path 需要包含它，`import skill.<名称>.skill` 才能命中
+SKILL_BASE = config.SKILL_BASE
 # 注册表缓存：按 (mtime, size) 指纹复用，文件未变化时不再打开脚本解析头部
-CACHE_PATH = os.path.join(config.PROJECT_ROOT, "data", "skill_registry.json")
+CACHE_PATH = os.path.join(config.DATA_DIR, "skill_registry.json")
 _CACHE_VERSION = 2
 
 _SKILL_RE = re.compile(r'^#\s*skill\s*:\s*(\S+)\s*$', re.I)
@@ -328,10 +330,28 @@ def set_status(name, status):
                   "（新会话生效；当前会话可 skill(all=true) 查看实时列表）")
 
 
+def _ensure_skill_path():
+    """确保 sys.path 首位是配置目录，使 `skill.<名称>.skill` 从 SKILL_DIR 导入。
+
+    仓库根目录自带普通包 `skill/`（含 __init__.py），若它排在前面会抢先命中，
+    导致配置目录下的技能全部导入失败；这里同时清掉已从别处导入的 skill 缓存。
+    """
+    while SKILL_BASE in sys.path:
+        sys.path.remove(SKILL_BASE)
+    sys.path.insert(0, SKILL_BASE)
+    pkg = sys.modules.get("skill")
+    if pkg is None:
+        return
+    pkg_file = getattr(pkg, "__file__", None)
+    pkg_dir = os.path.dirname(os.path.abspath(pkg_file)) if pkg_file else ""
+    if os.path.normcase(pkg_dir) != os.path.normcase(os.path.abspath(SKILL_DIR)):
+        for name in [m for m in list(sys.modules) if m == "skill" or m.startswith("skill.")]:
+            del sys.modules[name]
+
+
 def _load_run(meta):
     """按需导入 skill 脚本模块，返回其中的 run 函数。"""
-    if config.PROJECT_ROOT not in sys.path:
-        sys.path.insert(0, config.PROJECT_ROOT)
+    _ensure_skill_path()
     module = importlib.import_module(meta["module"])
     run = getattr(module, "run", None)
     if not callable(run):
@@ -348,8 +368,7 @@ def get_module(name):
     meta = REGISTRY.get(name)
     if not meta:
         return None
-    if config.PROJECT_ROOT not in sys.path:
-        sys.path.insert(0, config.PROJECT_ROOT)
+    _ensure_skill_path()
     try:
         return importlib.import_module(meta["module"])
     except Exception:

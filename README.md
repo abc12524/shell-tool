@@ -21,6 +21,7 @@ LLM 接入层只用 `requests` 直接发 HTTP 并自行解析 SSE，**不依赖 
 ```
 shell-tool/
 ├── dp.py                     # CLI 启动入口
+├── deploy.py                 # 部署：生成 ai 启动器，配置/data/skill 落到 ~/.config/shell-tool
 ├── core/
 │   ├── config.py             # 环境变量加载与全局配置
 │   ├── db.py                 # 存储层：本地 SQLite 唯一读写源 + 在线 MySQL 幂等同步
@@ -86,21 +87,45 @@ SKILL_HUB_REPO=hollow/shell-skills
 SKILL_HUB_BRANCH=main
 ```
 
-## 安装
+## 安装与部署（推荐）
 
 ```bash
 git clone git@github.com:abc12524/shell-tool.git
 cd shell-tool
-pip install -r requirements.txt   # requests, pymysql, flask, python-dotenv, rich
+python deploy.py
 ```
+
+`deploy.py` 可重复运行（只补缺失、不覆盖已有配置），一次做完：
+
+1. 在 `~/.local/bin` 生成 `ai` 启动器（Windows 为 `ai.cmd`），并把该目录加入 PATH（`--no-path` 跳过）；
+2. 给 `dp.py` 加执行权限（POSIX）；
+3. 用 `.env.example` 在 `~/.config/shell-tool/.env` 创建配置（仓库里已有 `.env` 时沿用其内容，避免丢 Key）；
+4. 把 `data/`（SQLite、skill 注册表）与 `skill/` 放到 `~/.config/shell-tool/`，并迁移仓库里已有的数据与技能。
+
+```bash
+python -m pip install -r requirements.txt   # requests, pymysql, flask, python-dotenv, rich
+```
+
+装完依赖后，新开终端即可：
+
+```bash
+ai "你好"          # 等价于 python dp.py "你好"
+```
+
+配置目录优先级：`SHELL_TOOL_HOME` 环境变量 > `~/.config/shell-tool`（存在 `.env` 时）> 仓库目录。
+启动器另可用 `SHELL_TOOL_REPO`（仓库位置）、`SHELL_TOOL_PYTHON`（解释器，默认优先 `$HOME/.venv/bin/python3`）覆盖。
 
 运行要求：**Python 3.8+**，无需 openai SDK（接入层是原生 `requests`）。
 
-复制环境变量模板并填写配置：
+### 手动安装（不部署）
 
 ```bash
+pip install -r requirements.txt
 cp .env.example .env
+python dp.py "你好"
 ```
+
+这种方式下 `.env`、`data/`、`skill/` 都留在仓库目录。
 
 ### 环境变量
 
@@ -124,7 +149,7 @@ cp .env.example .env
 | `OUTPUT_TRIM_MAX_CHARS` | 交给服务的字符预算（默认 6000）：服务端按预算裁，保首行 / 报错行 / 尾段，其余等间隔采样 |
 | `BALANCE_URL` | 余额查询地址：留空用 `DEEPSEEK_API_KEY` 查官方 `/user/balance`；配置后作为基址自动拼 `/api/balance`（如 `https://192.168.30.181:8083/`，无需 Key） |
 | `DB_ONLINE` | 在线 MySQL 同步开关：`true`=开启同步（默认 true；未配置或连接失败则仅用 SQLite），`false`=关闭 |
-| `SQLITE_DB_PATH` | 本地 SQLite 文件路径（唯一读写源，默认 `data/shell_tool.db`） |
+| `SQLITE_DB_PATH` | 本地 SQLite 文件路径（唯一读写源）；留空默认 `~/.config/shell-tool/data/shell_tool.db`（未部署时 `data/shell_tool.db`），相对路径按配置目录解析 |
 | `MYSQL_HOST/PORT/USER/PASSWORD/DB` | 在线 MySQL（同步副本）连接信息 |
 | `OPENVIKING_URL/KEY/USER` | OpenViking 外置记忆服务 |
 | `user_tips` | 用户自定义提示，每会话注入一次（包在 `<system-reminder><user_tips>` 内）；双引号内可用 `\n` 换行 |
@@ -154,7 +179,7 @@ LLM_USER_AGENT=shell-tool/1.0
 
 ### 数据库存储
 
-- **本地 SQLite（唯一读写源）**：无论是否启用在线库，会话/消息都先写入本地 `data/shell_tool.db`；读写均以本地库为准。
+- **本地 SQLite（唯一读写源）**：无论是否启用在线库，会话/消息都先写入本地 `data/shell_tool.db`（部署后为 `~/.config/shell-tool/data/shell_tool.db`）；读写均以本地库为准。
 - **在线 MySQL（同步副本）**：配置 `MYSQL_*` 且 `DB_ONLINE=true` 时，本地落库成功后把未同步的行幂等推送（upsert）到 MySQL。
   - **不重复**：每条消息带全局唯一 `uid`，MySQL 端对 `uid` 建唯一索引，重复推送不会产生重复行。
   - **不丢失**：每条记录带 `synced` 标记，推送失败保持未同步，下次启动/写入时自动重试。

@@ -9,7 +9,7 @@
 
 ## 1. 总览
 
-- skill 目录：项目根的 `skill/`。
+- skill 目录：配置目录的 `skill/`（部署后为 `~/.config/shell-tool/skill/`，未部署时为仓库根的 `skill/`）。
 - 核心只暴露一个原生工具 `skill`，模型通过它列表 / 查用法 / 执行。
 - 注册器（`core/tools/skill_tool.py`）在启动时扫描 `skill/`，识别文件夹布局：
 

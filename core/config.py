@@ -7,11 +7,38 @@ from dotenv import load_dotenv
 
 # core/ 目录（本文件所在目录）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# 项目根目录（core 的上一级，用于定位 skill/ 等外部资源）
+# 项目根目录（core 的上一级，用于定位代码、模板与文档）
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+# ===== 用户配置目录（.env / data/ / skill/ 的落点）=====
+# 优先级：SHELL_TOOL_HOME 环境变量 > ~/.config/shell-tool（deploy.py 部署后存在 .env）
+#         > 项目根目录（未部署，或直接在仓库里开发）
+DEFAULT_USER_HOME = os.path.join(os.path.expanduser('~'), '.config', 'shell-tool')
+
+
+def _resolve_config_home():
+    override = (os.environ.get('SHELL_TOOL_HOME', '') or '').strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    if os.path.isfile(os.path.join(DEFAULT_USER_HOME, '.env')):
+        return DEFAULT_USER_HOME
+    return PROJECT_ROOT
+
+
+CONFIG_HOME = _resolve_config_home()
 # .env 文件路径（-k/-m 等运行时覆盖写回此处）；缺失时从模板复制
-ENV_PATH = os.path.join(PROJECT_ROOT, '.env')
+ENV_PATH = os.path.join(CONFIG_HOME, '.env')
 ENV_EXAMPLE_PATH = os.path.join(PROJECT_ROOT, '.env.example')
+# 可变数据目录（SQLite 库、skill 注册表缓存）
+DATA_DIR = os.path.join(CONFIG_HOME, 'data')
+# skill 目录；SKILL_BASE 是 skill 包的导入根（import skill.<名称>.skill）
+SKILL_DIR = os.path.join(CONFIG_HOME, 'skill')
+SKILL_BASE = CONFIG_HOME
+for _dir in (CONFIG_HOME, DATA_DIR, SKILL_DIR):
+    try:
+        os.makedirs(_dir, exist_ok=True)
+    except OSError:
+        pass
 if not os.path.exists(ENV_PATH) and os.path.exists(ENV_EXAMPLE_PATH):
     shutil.copyfile(ENV_EXAMPLE_PATH, ENV_PATH)
 
@@ -171,7 +198,10 @@ SKILL_HUB_TOKEN = (os.environ.get('SKILL_HUB_TOKEN', '') or '').strip()
 DB_ONLINE = os.environ.get('DB_ONLINE', 'true') in ('1', 'true', 'True', 'yes')
 # 本地 SQLite 文件路径（DB_ONLINE=false 或 MySQL 不可用时使用）
 # 注意：.env 中留空时必须回退默认值，否则 sqlite3.connect('') 会打开内存库导致表丢失
-SQLITE_DB_PATH = os.environ.get('SQLITE_DB_PATH') or os.path.join(PROJECT_ROOT, 'data', 'shell_tool.db')
+# 相对路径按配置目录解析，避免启动器从任意工作目录运行时把库建到别处
+SQLITE_DB_PATH = os.environ.get('SQLITE_DB_PATH') or os.path.join('data', 'shell_tool.db')
+if not os.path.isabs(SQLITE_DB_PATH):
+    SQLITE_DB_PATH = os.path.join(CONFIG_HOME, SQLITE_DB_PATH)
 
 # ===== MySQL 在线存储 =====
 DB_CONFIG = {
