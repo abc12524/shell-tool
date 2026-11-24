@@ -751,7 +751,7 @@ async def chat_completion_with_tools(messages, session_id=None, ov_session_id=No
 
         # 一次并发执行本轮全部 function 调用（异步无同步屏障），结果一次性回传；
         # web_search_call 由服务端自动执行，仅随 assistant 消息原样回传供恢复结果
-        tool_results = await process_tool_calls(tool_calls)
+        tool_results = await process_tool_calls(tool_calls, session_id=session_id)
         all_tool_results.extend(tool_results)
 
         new_history_messages.append(assistant_msg)

@@ -79,10 +79,16 @@ def online_enabled():
     return _sync_enabled
 
 
-# 合成注入的用户消息角色（skill 名单 / OV profile / OV 召回块）。
+# 合成注入的用户消息角色（skill 名单 / OV profile / OV 召回块 / 交接文档）。
 # 只改变落库标识，便于与真实用户输入区分；读取/重放时统一映射回 'user'，
 # 因此旧库（role='user'）与既有调用方都不受影响。
 INSERT_USER_ROLE = 'insert_user'
+
+# 交接文档（上下文压缩）标记：内容以 <history> 开头、以 </history> 结尾。
+# 由原生工具 compress_context 写入（role=insert_user），下一次对话检测到未生效的记录时
+# 强制新开会话，并把这段 <history> 注入首轮上下文继续工作。
+HANDOFF_OPEN = '<history>'
+HANDOFF_CLOSE = '</history>'
 
 
 def _chat_role(role):
@@ -172,6 +178,11 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
+);
+CREATE TABLE IF NOT EXISTS handoff_applied (
+    uid             TEXT PRIMARY KEY,
+    applied_session TEXT NOT NULL DEFAULT '',
+    applied_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -394,6 +405,64 @@ def load_injected_contents(session_id, prefixes):
             f"SELECT content FROM chat_messages WHERE session_id=? AND ({cond}) ORDER BY id",
             params).fetchall()
     return [r['content'] or '' for r in rows]
+
+
+# ============= 上下文交接（压缩） =============
+def _supersede_pending_handoffs():
+    """把当前所有未生效的交接文档标记为失效（applied_session=''）。
+
+    同一时刻只需要一份待生效文档：模型在一轮里重复提交时，旧文档不应再被注入；
+    记录本身仍保留在 chat_messages 中（作为该会话的历史，可按会话继续查看）。
+    """
+    with _sqlite_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO handoff_applied (uid, applied_session) "
+            "SELECT uid, '' FROM chat_messages WHERE role=? AND substr(content, 1, ?) = ?",
+            (INSERT_USER_ROLE, len(HANDOFF_OPEN), HANDOFF_OPEN))
+        conn.commit()
+
+
+def save_handoff(session_id, body):
+    """把交接文档写入当前会话（role=insert_user，内容包在 <history> 内）。
+
+    返回 (uid, 正文字符数)，uid 用于之后标记该文档已在哪个会话中生效。
+    """
+    text = (body or '').strip()
+    if not text:
+        raise ValueError('交接文档内容为空')
+    content = f"{HANDOFF_OPEN}\n{text}\n{HANDOFF_CLOSE}"
+    uid = uuid.uuid4().hex
+    _supersede_pending_handoffs()
+    append_messages(session_id, [{"role": INSERT_USER_ROLE, "content": content, "uid": uid}])
+    return uid, len(text)
+
+
+def pending_handoff():
+    """取最近一条未生效的交接文档；无则返回 None。
+
+    返回 dict：uid / session_id（提交它的会话）/ content（含 <history> 包裹）/ created_at。
+    """
+    with _sqlite_conn() as conn:
+        row = conn.execute(
+            "SELECT m.uid, m.session_id, m.content, m.created_at FROM chat_messages m "
+            "WHERE m.role=? AND substr(m.content, 1, ?) = ? "
+            "AND NOT EXISTS (SELECT 1 FROM handoff_applied a WHERE a.uid = m.uid) "
+            "ORDER BY m.id DESC LIMIT 1",
+            (INSERT_USER_ROLE, len(HANDOFF_OPEN), HANDOFF_OPEN)).fetchone()
+    return dict(row) if row else None
+
+
+def apply_handoff(uid, session_id):
+    """标记交接文档已在 session_id 生效（此后不再参与新会话检测）。"""
+    if not uid:
+        return
+    with _sqlite_conn() as conn:
+        conn.execute(
+            "INSERT INTO handoff_applied (uid, applied_session) VALUES (?, ?) "
+            "ON CONFLICT(uid) DO UPDATE SET applied_session=excluded.applied_session, "
+            "applied_at=CURRENT_TIMESTAMP",
+            (uid, session_id or ''))
+        conn.commit()
 
 
 # ============= 在线同步（SQLite → MySQL，幂等） =============

@@ -11,6 +11,7 @@ LLM 接入层只用 `requests` 直接发 HTTP 并自行解析 SSE，**不依赖 
 - **远程技能仓库（skill_hub）** — 从 GitHub / Gitea 仓库（默认 `abc12524/shell-skills`）拉取根索引 `index.json` 查看可装技能（含平台/依赖），按需下载整包到本地 `skill/` 并热注册；CLI `-I` 安装 / `-D` 删除 或原生 `skill_hub` 工具均可
 - **脚本增删改查** — 数据源为本地 `file_path`（可写，改后写回原文件）或 http(s) `url`（只读），工具自动探测编码（utf-8/gb18030/big5 等）；read 支持按 `symbol`（单个/数组）/`pattern` 正则批量、按 `start_line~end_line` 取片段（带行号、可 `limit` 分页），或返回带行号的 `outline` 骨架；改/增/删采用精确字符串替换（对齐 edit 工具，唯一匹配、支持 `replace_all`）
 - **对话持久化** — 先落本地 SQLite（唯一读写源），再幂等同步到在线 MySQL，支持继续/新建/指定会话
+- **上下文压缩（交接文档）** — 上下文过长时模型调用 `compress_context` 把当前工作整理成交接文档落库；下一轮对话自动新开会话并注入 `<history>` 继续，避免历史无限膨胀
 - **OpenViking 记忆注入 / 抓取** — 每轮对话前自动检索相关记忆并注入上下文，可将对话写入 OV session 并提交提取记忆
 - **流式输出** — 展示思考过程（reasoning）与最终回答
 - **多协议接入** — DeepSeek 官方 Responses API（支持服务端内置 `web_search`）与 OpenAI 兼容 Chat Completions 网关（OpenCode Zen / OpenCode Go，含 `deepseek-v4.1-flash` 等模型），两条协议均基于 `requests` 实现，无需 openai SDK
@@ -32,7 +33,8 @@ shell-tool/
 │       ├── system_tools.py   # 系统信息 / 命令执行（原生 tool）
 │       ├── skill_tool.py     # skill 注册表：扫描 skill/ 自动注册（文件夹）+ 分发执行
 │       ├── skill_hub.py      # 远程技能仓库：查看 / 下载 / 卸载 skill
-│       └── __init__.py       # 原生工具 schema（get_system_info/execute_system_command/skill/skill_hub）+ 分发器
+│       ├── handoff.py        # 上下文压缩：交接文档落库（compress_context）
+│       └── __init__.py       # 原生工具 schema（静态）+ 分发器
 ├── skill/                    # skill 目录：按头部标准结构自动注册（可从远程仓库安装）
 ├── server/
 │   └── api.py                # Flask HTTP API（同步 + SSE 流式）
@@ -267,6 +269,7 @@ curl http://localhost:8000/health
 | `db` | `online` | 数据库模式 |
 | `session` | `action`(new/resume/saved), `id` | 会话状态 |
 | `memory` | `phase`(profile/recall), `found` | 记忆加载 / 召回 |
+| `handoff` | `chars` | 已注入交接文档并新开会话（上下文压缩） |
 | `config` | `keys` | `-k`/`-m` 更新的 .env 项 |
 | `reasoning_header` | — | 思考过程分隔 |
 | `tool_round` | `index`, `local`, `search` | 工具轮次 |
@@ -290,7 +293,9 @@ curl http://localhost:8000/health
 
 对话开始时批量并行执行模型请求的全部工具调用，结果一次性回传后直接输出最终回答；若模型在最终轮仍请求调用工具，在 `MAX_TOOL_ROUNDS` 预算内可再执行，超出则强制基于已有结果作答。所有工具统一返回规范信封 `{"status":"ok","result":{...}}` / `{"status":"error","error":...}`，与 OpenViking 后端及 DSH 会话格式保持一致。
 
-模型面向的原生工具只有 `get_system_info`、`execute_system_command`、`skill` 三个；其中 `skill` 负责列出 / 查看用法 / 执行 `skill/` 目录下的脚本（当前为空，可从远程仓库安装），脚本在进程内执行，新增脚本即自动注册。
+模型面向的原生工具只有 `get_system_info`、`execute_system_command`、`skill`、`skill_hub` 与 `compress_context`；其中 `skill` 负责列出 / 查看用法 / 执行 `skill/` 目录下的脚本（当前为空，可从远程仓库安装），脚本在进程内执行，新增脚本即自动注册。
+
+`compress_context` 是上下文压缩 / 交接文档：传入 `content`（正文）或 `path`（本地文本文件，至少一个），内容落库为 `role=insert_user` 的 `<history>` 消息；下一次对话（无论有没有 `-n`）检测到未生效的交接文档就强制新开会话，并把这段 `<history>` 注入首轮 `<system-reminder>`，用压缩后的历史继续工作。显式 `-s <id>` 时尊重指定会话，文档留待下次生效；同一时刻只保留一份待生效文档。
 
 `execute_system_command` 的 bash / PowerShell 输出在返回前会先交给输出修剪服务（后端用 rtk-web 实现，`OUTPUT_TRIM_*` 可配置）修剪；服务不可达、超时或返回异常时静默使用原始输出，不影响命令本身的退出码与结果。
 

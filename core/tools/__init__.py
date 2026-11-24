@@ -12,6 +12,7 @@ from .envelope import ok
 from .system_tools import get_system_info, execute_system_command
 from .skill_tool import skill_tool
 from .skill_hub import skill_hub, source_label as _hub_source
+from .handoff import compress_context
 from .. import config
 from .. import events
 
@@ -22,6 +23,7 @@ __all__ = [
     "execute_system_command",
     "skill_tool",
     "skill_hub",
+    "compress_context",
 ]
 
 
@@ -115,6 +117,33 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "compress_context",
+            "description": (
+                "上下文压缩（交接文档）。上下文过长、或当前工作要留给后续继续时调用："
+                "把已完成的工作、关键结论与文件路径、待办与下一步、注意事项整理成一份交接文档提交。"
+                "文档保存为本地库中的 insert_user 记录并包在 <history> 内；"
+                "下一轮对话（无论用户是否加 -n）会自动开启新会话，并注入该 <history> 继续工作。"
+                "content 与 path 至少提供一个。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "交接文档正文（Markdown 即可）：目标、已完成、关键结论/文件路径、待办、注意事项"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "可选：本地文本文件路径，读取其内容一并写入交接文档"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
 ]
 
 
@@ -130,6 +159,13 @@ TOOL_FUNCTIONS = {
     "execute_system_command": lambda args: execute_system_command(args.get('command', '')),
     "skill": lambda args: skill_tool(args.get('all', False), args.get('skill', ''), args.get('arguments')),
     "skill_hub": lambda args: skill_hub(args.get('action', 'list'), args.get('name', '')),
+}
+
+# 需要会话上下文的工具：handler(arguments, ctx)，ctx = {"session_id": ...}
+# 与 TOOL_FUNCTIONS 分开，避免所有处理器都被迫接受未使用的 ctx 参数。
+TOOL_FUNCTIONS_CTX = {
+    "compress_context": lambda args, ctx: compress_context(
+        args.get('content', ''), args.get('path', ''), ctx.get('session_id')),
 }
 
 
@@ -166,10 +202,11 @@ def _parse_tool_arguments(raw):
     return None, f"参数不是合法 JSON（已尝试容错修复仍失败）: {raw[:200]}"
 
 
-async def _execute_single_tool(tool_call):
+async def _execute_single_tool(tool_call, ctx=None):
     """异步执行单个工具调用，返回 tool 结果消息（供并发执行）。
 
     参数 JSON 解析失败不再中断整轮执行，而是以 tool 错误信息回传模型自纠。
+    ctx 为会话上下文（如 {"session_id": ...}），只有 TOOL_FUNCTIONS_CTX 里的工具会用到。
     """
     # 先取工具名与调用 id（不依赖参数解析，确保总能产出关联结果）
     if hasattr(tool_call, 'function'):
@@ -194,8 +231,15 @@ async def _execute_single_tool(tool_call):
 
     # 执行对应函数（同步阻塞函数放到线程池，不阻塞事件循环）
     # 用 run_in_executor 而非 asyncio.to_thread（后者 3.9+），保证 Python 3.8 可用
+    ctx_tool = TOOL_FUNCTIONS_CTX.get(function_name)
     handler = TOOL_FUNCTIONS.get(function_name)
-    if handler:
+    if ctx_tool:
+        try:
+            loop = asyncio.get_running_loop()
+            result_str = await loop.run_in_executor(None, ctx_tool, arguments, ctx or {})
+        except Exception as e:
+            result_str = f"Error: 工具 {function_name} 执行失败 - {str(e)}"
+    elif handler:
         try:
             loop = asyncio.get_running_loop()
             result_str = await loop.run_in_executor(None, handler, arguments)
@@ -213,18 +257,20 @@ async def _execute_single_tool(tool_call):
     }
 
 
-async def process_tool_calls(tool_calls):
+async def process_tool_calls(tool_calls, session_id=None):
     """异步并发执行工具调用，返回 tool 结果消息列表（role=tool）
 
     无同步屏障：任务全部并发发起，谁先完成谁先返回（as_completed 逐个交付），
     不等待最慢者；返回列表按输入顺序排列（各结果自带 tool_call_id 关联），
     但执行/交付过程是流式的——快任务完成即输出，慢任务稍后跟上。
+    session_id 透传给需要会话上下文的工具（如 compress_context 把交接文档记到当前会话）。
     """
     if not tool_calls:
         return []
 
     # 并发创建全部任务，无屏障逐个收集完成结果（FIRST_COMPLETED 循环）
-    tasks = [asyncio.create_task(_execute_single_tool(tc)) for tc in tool_calls]
+    ctx = {"session_id": session_id}
+    tasks = [asyncio.create_task(_execute_single_tool(tc, ctx)) for tc in tool_calls]
     idx_map = {id(t): i for i, t in enumerate(tasks)}
     results = [None] * len(tool_calls)
     done_count = 0

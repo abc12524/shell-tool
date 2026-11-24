@@ -475,6 +475,13 @@ def ev_memory(phase, found):
     _ev("memory", {"phase": phase, "found": bool(found)}, None)
 
 
+def ev_handoff(chars):
+    """上下文交接：检测到交接文档 → 本轮强制新开会话并注入 <history>。"""
+    def t():
+        console.print(Text(f"  ▸ 已注入交接文档（{chars} 字符），本轮按新会话继续", style="ok"))
+    _ev("handoff", {"chars": int(chars or 0)}, t)
+
+
 def ev_question(text):
     _ev("question", {"text": text}, None)
 
