@@ -4,16 +4,20 @@
 做的事（可重复运行，只补缺失、不覆盖已有配置）：
   1. 生成启动器：POSIX 下 ~/.local/bin/ai，Windows 下 ~/.local/bin/ai.cmd；
      并把该目录加进 PATH（--no-path 可跳过）。
-  2. 给 dp.py 加执行权限（POSIX）。
-  3. 用 .env.example 在 ~/.config/shell-tool/ 下创建 .env
+  2. Windows 下在 PowerShell profile 里写入/刷新 `ai` 函数（带完整选项与交互模式）；
+     用 $args 透传参数，避免 -I/-D 被 PowerShell 当成公共参数吃掉（--no-ps-profile 可跳过）。
+  3. 给 dp.py 加执行权限（POSIX）。
+  4. 用 .env.example 在 ~/.config/shell-tool/ 下创建 .env
      （仓库里已有 .env 时优先沿用其内容，避免丢 Key）。
-  4. data/ 与 skill/ 放到 ~/.config/shell-tool/ 下，并把仓库里已有的数据 / 技能补拷过去。
+  5. data/ 与 skill/ 放到 ~/.config/shell-tool/ 下，并把仓库里已有的数据 / 技能补拷过去。
 
 用法：
     python deploy.py                     # 默认安装
     python deploy.py --no-path           # 不改 PATH，只生成启动器
+    python deploy.py --no-ps-profile     # 不写入 PowerShell ai 函数
     python deploy.py --home ~/my-conf    # 自定义配置目录
     python deploy.py --bin ~/.local/bin  # 自定义启动器目录
+    python deploy.py --ps-profile <路径> # 自定义 PowerShell profile（测试/特殊布局）
 
 运行时 core/config.py 按 SHELL_TOOL_HOME > ~/.config/shell-tool（存在 .env 时）> 仓库目录
 的顺序定位配置，因此启动器无需再传路径。
@@ -166,6 +170,164 @@ def write_launcher(bin_dir):
     return path
 
 
+# ---------- PowerShell ai 函数 ----------
+
+PS_PROFILE_MARK_BEGIN = "# >>> shell-tool ai function >>>"
+PS_PROFILE_MARK_END = "# <<< shell-tool ai function <<<"
+
+# 占位符 __HOME__ / __REPO__ 会被替换成 PowerShell 单引号字符串。
+# 用 $args 而非 param(ValueFromRemainingArguments)：后者会让 PowerShell 把
+# -I 当成 -InformationAction/-InformationVariable、-D 当成 -Debug 吃掉。
+_PS_AI_TEMPLATE = r"""# >>> shell-tool ai function >>>
+# shell-tool ai 函数（deploy.py 生成；重新运行 deploy.py 可刷新）
+$env:SHELL_TOOL_HOME = __HOME__
+$env:PYTHONIOENCODING = 'utf-8'
+
+$AI_HELP = @'
+shell-tool AI 命令
+
+用法：
+  ai "你的问题"                 单次提问（默认复用最近会话）
+  ai                            进入交互模式
+  ai -n "你的问题"              新开会话后提问
+  ai -n                         只新开会话，不提问
+  ai -s [会话ID]                列出最近 5 条会话 / 继续指定会话
+  ai -S [名称 enable|disable]   列出 / 开关本地 skill
+  ai -I [名称...]               列出远程可装 skill / 安装（名称不完整按前缀搜索）
+  ai -D <名称...>               删除本地已装 skill
+  ai -k <key>                   覆盖 DeepSeek API Key 并写回 .env
+  ai -m <model>                 覆盖模型名并写回 .env
+  ai -h / --help                显示本帮助
+
+交互模式命令（仅 ai 不带参数时）：
+  :new / :n        新开会话       :sessions / :s   会话列表
+  :skills / :sk    本地 skill     :install / :i    远程 skill 列表/安装
+  :delete / :d     删除本地 skill :key / :k        覆盖 API Key
+  :model / :m      覆盖模型名     :help / :?       显示本帮助
+  :q / :quit / exit  退出
+'@
+
+function ai {
+    $Rest = @($args | ForEach-Object { [string]$_ })
+
+    if ($Rest.Count -gt 0 -and ($Rest[0] -in @('-h', '--help', '?'))) {
+        Write-Host $AI_HELP
+        return
+    }
+
+    $entry = Join-Path __REPO__ 'dp.py'
+    if (-not (Test-Path $entry)) {
+        Write-Host "[ai] 未找到入口: $entry" -ForegroundColor Red
+        return
+    }
+
+    $oldEnc = [Console]::OutputEncoding
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    try {
+        # 带参数：按 dp.py 原生参数执行一次（含 -I / -D / -S / -s / -k / -m）
+        if ($Rest.Count -gt 0) {
+            & python $entry @Rest
+            return
+        }
+
+        # 不带参数：交互模式（每轮复用最近会话，保证上下文连续）
+        Write-Host 'shell-tool 交互模式 —— 直接输入问题回车发送' -ForegroundColor Cyan
+        Write-Host '  :help 查看全部命令；:q 退出' -ForegroundColor DarkGray
+
+        while ($true) {
+            $raw = Read-Host '你'
+            if ($null -eq $raw) { break }
+            $line = $raw.Trim()
+            if ($line -eq '') { continue }
+
+            $parts = @($line -split '\s+')
+            $cmd = $parts[0].ToLowerInvariant()
+            $tail = @($parts | Select-Object -Skip 1)
+
+            if ($cmd -in @(':q', ':quit', 'exit')) { break }
+            elseif ($cmd -in @(':new', ':n'))        { & python $entry -n @tail }
+            elseif ($cmd -in @(':sessions', ':s'))   { & python $entry -s @tail }
+            elseif ($cmd -in @(':skills', ':sk'))    { & python $entry -S @tail }
+            elseif ($cmd -in @(':install', ':i'))    { & python $entry -I @tail }
+            elseif ($cmd -in @(':delete', ':d'))     { & python $entry -D @tail }
+            elseif ($cmd -in @(':key', ':k'))        { & python $entry -k @tail }
+            elseif ($cmd -in @(':model', ':m'))      { & python $entry -m @tail }
+            elseif ($cmd -in @(':help', ':?', ':h')) { Write-Host $AI_HELP }
+            else                                     { & python $entry $line }
+        }
+        Write-Host '已退出 shell-tool 交互模式' -ForegroundColor DarkGray
+    }
+    finally {
+        [Console]::OutputEncoding = $oldEnc
+    }
+}
+# <<< shell-tool ai function <<<
+"""
+
+
+def _ps_quote(value):
+    """转 PowerShell 单引号字符串（内部单引号加倍）。"""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def powershell_profile_paths():
+    """PowerShell 7 与 Windows PowerShell 5.1 的当前用户 profile 路径。
+
+    SHELL_TOOL_PS_PROFILE 可用分号分隔覆盖，便于测试与特殊布局。
+    """
+    custom = os.environ.get("SHELL_TOOL_PS_PROFILE", "").strip()
+    if custom:
+        return [os.path.abspath(os.path.expanduser(p.strip()))
+                for p in custom.split(";") if p.strip()]
+    docs = os.path.join(os.path.expanduser("~"), "Documents")
+    return [os.path.join(docs, "PowerShell", "Microsoft.PowerShell_profile.ps1"),
+            os.path.join(docs, "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1")]
+
+
+def _read_text_smart(path):
+    """兼容 UTF-8(BOM) / GBK 的已有 profile，避免改写时损坏原有中文。"""
+    with open(path, "rb") as f:
+        raw = f.read()
+    for enc in ("utf-8-sig", "gbk", "utf-8"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def write_powershell_profile(repo, home):
+    """在 PowerShell profile 中写入/刷新受管理的 ai 函数块（幂等）。"""
+    block = (_PS_AI_TEMPLATE.replace("__HOME__", _ps_quote(home))
+             .replace("__REPO__", _ps_quote(repo)))
+    written = []
+    for path in powershell_profile_paths():
+        parent = os.path.dirname(path)
+        if not os.path.isdir(parent):
+            continue
+        old = _read_text_smart(path) if os.path.exists(path) else ""
+        if PS_PROFILE_MARK_BEGIN in old and PS_PROFILE_MARK_END in old:
+            pre = old.split(PS_PROFILE_MARK_BEGIN, 1)[0]
+            post = old.split(PS_PROFILE_MARK_END, 1)[1].lstrip("\r\n")
+            text = pre + block + post
+            action = "已刷新"
+        else:
+            if "function ai" in old.lower():
+                warn(f"  ! {path} 已有自定义 ai 函数；新块追加在末尾会覆盖它")
+            sep = "\r\n\r\n" if old.strip() else ""
+            text = old.rstrip("\r\n") + sep + block + "\r\n"
+            action = "已写入"
+        try:
+            # BOM 保证 Windows PowerShell 5.1 正确识别中文
+            with open(path, "w", encoding="utf-8-sig", newline="\r\n") as f:
+                f.write(text)
+            say(f"  + {action} PowerShell ai 函数 {path}")
+            written.append(path)
+        except OSError as e:
+            warn(f"  ! 写入 {path} 失败：{e}")
+    return written
+
+
 # ---------- PATH ----------
 
 def path_has(paths, target):
@@ -274,24 +436,36 @@ def main():
     parser.add_argument("--bin", default=DEFAULT_BIN,
                         help=f"启动器目录，默认 {DEFAULT_BIN}")
     parser.add_argument("--no-path", action="store_true", help="不修改 PATH")
+    parser.add_argument("--no-ps-profile", action="store_true", help="不写入 PowerShell ai 函数")
+    parser.add_argument("--ps-profile", help="自定义 PowerShell profile 路径（; 分隔多个）")
     args = parser.parse_args()
+
+    if args.ps_profile:
+        os.environ["SHELL_TOOL_PS_PROFILE"] = args.ps_profile
 
     home = os.path.abspath(os.path.expanduser(args.home))
     bin_dir = os.path.abspath(os.path.expanduser(args.bin))
 
     say("shell-tool 部署")
-    say("[1/4] 创建配置目录与配置文件")
+    say("[1/5] 创建配置目录与配置文件")
     setup_home(home)
-    say("[2/4] 生成 ai 启动器")
+    say("[2/5] 生成 ai 启动器")
     launcher = write_launcher(bin_dir)
-    say("[3/4] 配置 PATH")
+    say("[3/5] 配置 PowerShell ai 函数")
+    if not IS_WINDOWS:
+        say("  - 非 Windows，跳过")
+    elif args.no_ps_profile:
+        say("  - 已用 --no-ps-profile 跳过")
+    else:
+        write_powershell_profile(REPO, home)
+    say("[4/5] 配置 PATH")
     if args.no_path:
         say(f"  - 跳过；请自行确保 {bin_dir} 在 PATH 中")
     elif IS_WINDOWS:
         add_path_windows(bin_dir)
     else:
         add_path_unix(bin_dir)
-    say("[4/4] 检查执行权限")
+    say("[5/5] 检查执行权限")
     make_executable()
 
     env_path = os.path.join(home, ".env")
@@ -302,12 +476,15 @@ def main():
     say(f"    data/   {os.path.join(home, 'data')}")
     say(f"    skill/  {os.path.join(home, 'skill')}")
     say(f"  启动器    {launcher}")
+    if IS_WINDOWS and not args.no_ps_profile:
+        say(f"  PowerShell profile  {'; '.join(powershell_profile_paths())}")
     say("")
     say("下一步：")
     say(f"  1. 编辑 {env_path}，至少填 DEEPSEEK_API_KEY")
     say("  2. 安装依赖： python -m pip install -r requirements.txt")
-    say("  3. 新开一个终端，运行： ai \"你好\"")
-    say("  可用 SHELL_TOOL_HOME / SHELL_TOOL_REPO / SHELL_TOOL_PYTHON 覆盖默认路径。")
+    say("  3. 新开一个终端，运行： ai \"你好\"（ai -h 查看全部选项）")
+    say("  可用 SHELL_TOOL_HOME / SHELL_TOOL_REPO / SHELL_TOOL_PYTHON / "
+        "SHELL_TOOL_PS_PROFILE 覆盖默认路径。")
 
 
 if __name__ == "__main__":

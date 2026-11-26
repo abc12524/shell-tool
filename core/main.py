@@ -28,9 +28,10 @@ from .recall import (
     openviking_block,
 )
 
-USAGE = """使用方法：python dp.py [选项] [问题]
+USAGE = """使用方法：ai [选项] [问题]（等价于 python dp.py [选项] [问题]）
 
   直接加问题   → 默认同一对话（复用最近的活跃会话）
+  -h, --help   → 显示本帮助
   -n, --new    → 终结当前对话，并新开一个对话（可只给 -n 不带问题：仅开新会话不开聊）
   -s, --session [id] → 不带 id：列出最近 5 条会话；带 id：继续指定会话（可指定历史会话）
   -S, --skill [名称] [enable|disable] → 不带参数：列出全部 skill 及 status；带参数：开关该 skill 的 status
@@ -39,14 +40,15 @@ USAGE = """使用方法：python dp.py [选项] [问题]
   -D, --delete <名称...> → 删除已安装的本地 skill 文件夹（可多个，空格分隔）
   -k, --key <key>    → 覆盖 DEEPSEEK_API_KEY，并写回 .env
   -m, --model <name> → 覆盖 DEEPSEEK_MODEL，并写回 .env
-  不加参数     → 查看此帮助
+  不加参数     → 查看此帮助；PowerShell 下直接输入 ai 则进入交互模式
+  交互模式     → :new / :sessions / :skills / :install / :delete / :key / :model / :help / :q
 """
 
 
 def parse_args(argv):
     """解析命令行参数，返回
     (new_flag, session_id, list_sessions, question, api_key, model,
-     skill_status, show_skills, hub_action)
+     skill_status, show_skills, hub_action, show_help)
     hub_action: None | ('list', None) | ('install', [名称...]) | ('delete', [名称...])"""
     new_flag = False
     sid = None
@@ -55,12 +57,16 @@ def parse_args(argv):
     model = None
     skill_status = None
     show_skills = False
+    show_help = False
     hub_action = None
     question_parts = []
     i = 1
     while i < len(argv):
         a = argv[i]
-        if a in ('-n', '--new'):
+        if a in ('-h', '--help'):
+            show_help = True
+            i += 1
+        elif a in ('-n', '--new'):
             new_flag = True
             i += 1
         elif a in ('-S', '--skill'):
@@ -127,7 +133,7 @@ def parse_args(argv):
             question_parts.append(a)
             i += 1
     return (new_flag, sid, list_sessions, ' '.join(question_parts),
-            api_key, model, skill_status, show_skills, hub_action)
+            api_key, model, skill_status, show_skills, hub_action, show_help)
 
 
 def _state_text(state, desc):
@@ -153,7 +159,7 @@ def print_skills():
     rows = [(name, _state_text(status, desc))
             for name, (status, desc) in sorted(overview.items())]
     render_table(f"🧰 已注册 skill（{len(rows)}）", rows,
-                 note="开关  python dp.py -S <名称> <enable|disable>")
+                 note="开关  ai -S <名称> <enable|disable>")
 
 
 def print_remote_skills(skills=None, caption=None):
@@ -183,7 +189,7 @@ def print_remote_skills(skills=None, caption=None):
         rows.append((s["name"], line))
     extra = f" · {caption}" if caption else ""
     render_table(f"🌐 远程 skill{extra}（{hub_source()}，{len(rows)}）", rows,
-                 note="安装  python dp.py -I <名称>")
+                 note="安装  ai -I <名称>")
 
 
 def new_session_id():
@@ -266,7 +272,7 @@ def print_recent_sessions(limit=5):
             else Text(f"  {s['id']}", style="kv.key")
         rows.append((name, value))
     render_table(f"🕘 最近 {len(sessions)} 条会话", rows,
-                 note='继续  python dp.py -s <id> "你的问题"')
+                 note='继续  ai -s <id> "你的问题"')
 
 
 # 每轮上下文注入：user_turn / skill 名单 / OV / user_tips 合并为一条
@@ -401,8 +407,13 @@ def main():
 
 async def _async_main():
     (new_flag, sid, list_sessions, question, api_key, model,
-     skill_status, show_skills, hub_action) = parse_args(sys.argv)
+     skill_status, show_skills, hub_action, show_help) = parse_args(sys.argv)
     asked_at = datetime.now(timezone.utc)
+
+    # -h/--help：显示帮助后退出（不建会话、不调用模型）
+    if show_help:
+        print(USAGE)
+        sys.exit(0)
 
     # -S/--skill 无参数：列出全部 skill 及 status 后退出
     if show_skills:
@@ -457,7 +468,7 @@ async def _async_main():
         for keyword, hits in searched:
             print_remote_skills(hits, f"匹配 '{keyword}'")
         for skill_name in missing:
-            say(f"远程仓库没有 skill '{skill_name}'（可用 python dp.py -I 查看全部）", "warn")
+            say(f"远程仓库没有 skill '{skill_name}'（可用 ai -I 查看全部）", "warn")
             failed += 1
         for skill_name in targets:
             try:
