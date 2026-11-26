@@ -2,18 +2,22 @@
 """部署脚本：克隆仓库后运行一次，把 shell-tool 装成命令行命令 `ai`。
 
 做的事（可重复运行，只补缺失、不覆盖已有配置）：
-  1. 生成启动器：POSIX 下 ~/.local/bin/ai，Windows 下 ~/.local/bin/ai.cmd；
-     并把该目录加进 PATH（--no-path 可跳过）。
-  2. Windows 下在 PowerShell profile 里写入/刷新 `ai` 函数（带完整选项与交互模式）；
+  1. 检查 Python 环境：优先用系统 python3 在 ~/.venv 创建虚拟环境，并按 requirements.txt
+     安装依赖；已有且依赖齐全则直接复用（--no-venv / --venv 可调整）。
+  2. 生成启动器：POSIX 下 ~/.local/bin/ai，Windows 下 ~/.local/bin/ai.cmd；
+     并把该目录加进 PATH（--no-path 可跳过）。启动器固定使用上面的 Python。
+  3. Windows 下在 PowerShell profile 里写入/刷新 `ai` 函数（带完整选项与交互模式）；
      用 $args 透传参数，避免 -I/-D 被 PowerShell 当成公共参数吃掉（--no-ps-profile 可跳过）。
-  3. 给 dp.py 加执行权限（POSIX）。
-  4. 用 .env.example 在 ~/.config/shell-tool/ 下创建 .env
+  4. 给 dp.py 加执行权限（POSIX）。
+  5. 用 .env.example 在 ~/.config/shell-tool/ 下创建 .env
      （仓库里已有 .env 时优先沿用其内容，避免丢 Key）。
-  5. data/ 与 skill/ 放到 ~/.config/shell-tool/ 下，并把仓库里已有的数据 / 技能补拷过去。
+  6. data/ 与 skill/ 放到 ~/.config/shell-tool/ 下，并把仓库里已有的数据 / 技能补拷过去。
 
 用法：
     python deploy.py                     # 默认安装
     python deploy.py --no-path           # 不改 PATH，只生成启动器
+    python deploy.py --no-venv           # 不建虚拟环境，直接用系统 python3
+    python deploy.py --venv ~/venvs/ai   # 自定义虚拟环境目录
     python deploy.py --no-ps-profile     # 不写入 PowerShell ai 函数
     python deploy.py --home ~/my-conf    # 自定义配置目录
     python deploy.py --bin ~/.local/bin  # 自定义启动器目录
@@ -26,6 +30,7 @@ import argparse
 import os
 import shutil
 import stat
+import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +38,7 @@ IS_WINDOWS = sys.platform == "win32"
 LAUNCHER_NAME = "ai.cmd" if IS_WINDOWS else "ai"
 DEFAULT_HOME = os.path.join(os.path.expanduser("~"), ".config", "shell-tool")
 DEFAULT_BIN = os.path.join(os.path.expanduser("~"), ".local", "bin")
+DEFAULT_VENV = os.path.join(os.path.expanduser("~"), ".venv")
 
 
 def say(msg):
@@ -45,6 +51,97 @@ def warn(msg):
 
 def same_path(a, b):
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+# ---------- Python 环境 ----------
+
+def system_python():
+    """系统 Python：优先 python3，其次 python / py -3 / 当前解释器。
+
+    只返回真正能执行 `-c` 的解释器，避开 Windows 商店的 python3 占位程序。
+    """
+    candidates = []
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    if IS_WINDOWS:
+        py = shutil.which("py")
+        if py:
+            candidates.append(py)  # 下面用 -3 参数探测
+    candidates.append(sys.executable)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        args = [candidate, "-3", "-c", "import sys; sys.exit(0)"] \
+            if os.path.basename(candidate).lower() == "py.exe" else \
+            [candidate, "-c", "import sys; sys.exit(0)"]
+        try:
+            if subprocess.run(args, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=15).returncode == 0:
+                return candidate
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return sys.executable
+
+
+def venv_python(venv_dir):
+    return os.path.join(venv_dir, "Scripts" if IS_WINDOWS else "bin",
+                        "python.exe" if IS_WINDOWS else "python3")
+
+
+def _has_deps(py):
+    """检查运行 shell-tool 所需的依赖是否齐全。"""
+    try:
+        return subprocess.run(
+            [py, "-c", "import requests, dotenv, rich, flask, pymysql"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _run(cmd, what):
+    """执行命令，失败时给出末几行输出而不是整段 traceback。"""
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors="replace", timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        warn(f"  ! {what}失败：{e}")
+        return False
+    if result.returncode == 0:
+        return True
+    tail = "\n".join((result.stdout or "").strip().splitlines()[-6:])
+    warn(f"  ! {what}失败（exit {result.returncode}）")
+    if tail:
+        warn("    " + tail.replace("\n", "\n    "))
+    return False
+
+
+def ensure_python_env(venv_dir, use_venv=True):
+    """确保有可用的 Python 及依赖，返回要写入启动器的解释器路径。"""
+    system = system_python()
+    say(f"  = 系统 Python：{system}")
+    if not use_venv:
+        return system
+
+    py = venv_python(venv_dir)
+    if os.path.isfile(py) and _has_deps(py):
+        say(f"  = 复用已有虚拟环境 {venv_dir}")
+        return py
+    if not os.path.isfile(py):
+        say(f"  + 用 {system} 创建虚拟环境 {venv_dir}")
+        if not _run([system, "-m", "venv", venv_dir], "创建虚拟环境"):
+            warn("  ! 回退使用系统 Python")
+            return system
+    req = os.path.join(REPO, "requirements.txt")
+    if not os.path.isfile(req):
+        warn(f"  ! 缺少 {req}，跳过依赖安装")
+        return py
+    say("  + 安装依赖 requirements.txt")
+    if not _run([py, "-m", "pip", "install", "-r", req], "安装依赖"):
+        warn("  ! 依赖未装齐，首次运行 ai 可能报 ModuleNotFoundError")
+    return py
 
 
 # ---------- .env / data / skill ----------
@@ -111,16 +208,16 @@ def copy_missing(src_dir, dst_dir):
 
 # ---------- 启动器 ----------
 
-def unix_launcher():
+def unix_launcher(python_path):
     repo = REPO.replace("'", "'\\''")
+    py = python_path.replace("'", "'\\''")
     return f"""#!/bin/sh
 # shell-tool 启动器（deploy.py 生成；重新运行 deploy.py 可刷新）
 DEFAULT_REPO='{repo}'
+DEFAULT_PY='{py}'
 REPO="${{SHELL_TOOL_REPO:-$DEFAULT_REPO}}"
 PY="${{SHELL_TOOL_PYTHON:-}}"
-if [ -z "$PY" ] && [ -x "$HOME/.venv/bin/python3" ]; then
-    PY="$HOME/.venv/bin/python3"
-fi
+if [ -z "$PY" ] && [ -x "$DEFAULT_PY" ]; then PY="$DEFAULT_PY"; fi
 if [ -z "$PY" ]; then
     if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
 fi
@@ -132,7 +229,7 @@ PYTHONIOENCODING="${{PYTHONIOENCODING:-utf-8}}" PYTHONUTF8=1 exec "$PY" "$REPO/d
 """
 
 
-def windows_launcher():
+def windows_launcher(python_path):
     # .cmd 里只用 ASCII：避免 cmd.exe 代码页把中文提示变成乱码
     return f"""@echo off
 rem shell-tool launcher (generated by deploy.py; re-run deploy.py to refresh)
@@ -144,13 +241,14 @@ if not exist "%SHELL_TOOL_REPO%\\dp.py" (
   echo ai: shell-tool repo not found: %SHELL_TOOL_REPO% ^(set SHELL_TOOL_REPO to override^) 1>&2
   exit /b 1
 )
+if not defined SHELL_TOOL_PYTHON set "SHELL_TOOL_PYTHON={python_path}"
 if defined SHELL_TOOL_PYTHON (
   "%SHELL_TOOL_PYTHON%" "%SHELL_TOOL_REPO%\\dp.py" %*
   exit /b %ERRORLEVEL%
 )
-where python >nul 2>nul
+where python3 >nul 2>nul
 if %ERRORLEVEL%==0 (
-  python "%SHELL_TOOL_REPO%\\dp.py" %*
+  python3 "%SHELL_TOOL_REPO%\\dp.py" %*
   exit /b %ERRORLEVEL%
 )
 py -3 "%SHELL_TOOL_REPO%\\dp.py" %*
@@ -158,10 +256,11 @@ exit /b %ERRORLEVEL%
 """
 
 
-def write_launcher(bin_dir):
+def write_launcher(bin_dir, python_path):
     os.makedirs(bin_dir, exist_ok=True)
     path = os.path.join(bin_dir, LAUNCHER_NAME)
-    content = windows_launcher() if IS_WINDOWS else unix_launcher()
+    content = (windows_launcher(python_path) if IS_WINDOWS
+               else unix_launcher(python_path))
     with open(path, "w", encoding="utf-8", newline="\r\n" if IS_WINDOWS else "\n") as f:
         f.write(content)
     if not IS_WINDOWS:
@@ -221,12 +320,18 @@ function ai {
         return
     }
 
+    $py = if ($env:SHELL_TOOL_PYTHON) { $env:SHELL_TOOL_PYTHON } else { __PYTHON__ }
+    if (-not (Test-Path $py)) {
+        Write-Host "[ai] 未找到 Python: $py（可设 SHELL_TOOL_PYTHON 覆盖）" -ForegroundColor Red
+        return
+    }
+
     $oldEnc = [Console]::OutputEncoding
     [Console]::OutputEncoding = [Text.Encoding]::UTF8
     try {
         # 带参数：按 dp.py 原生参数执行一次（含 -I / -D / -S / -s / -k / -m）
         if ($Rest.Count -gt 0) {
-            & python $entry @Rest
+            & $py $entry @Rest
             return
         }
 
@@ -245,15 +350,15 @@ function ai {
             $tail = @($parts | Select-Object -Skip 1)
 
             if ($cmd -in @(':q', ':quit', 'exit')) { break }
-            elseif ($cmd -in @(':new', ':n'))        { & python $entry -n @tail }
-            elseif ($cmd -in @(':sessions', ':s'))   { & python $entry -s @tail }
-            elseif ($cmd -in @(':skills', ':sk'))    { & python $entry -S @tail }
-            elseif ($cmd -in @(':install', ':i'))    { & python $entry -I @tail }
-            elseif ($cmd -in @(':delete', ':d'))     { & python $entry -D @tail }
-            elseif ($cmd -in @(':key', ':k'))        { & python $entry -k @tail }
-            elseif ($cmd -in @(':model', ':m'))      { & python $entry -m @tail }
+            elseif ($cmd -in @(':new', ':n'))        { & $py $entry -n @tail }
+            elseif ($cmd -in @(':sessions', ':s'))   { & $py $entry -s @tail }
+            elseif ($cmd -in @(':skills', ':sk'))    { & $py $entry -S @tail }
+            elseif ($cmd -in @(':install', ':i'))    { & $py $entry -I @tail }
+            elseif ($cmd -in @(':delete', ':d'))     { & $py $entry -D @tail }
+            elseif ($cmd -in @(':key', ':k'))        { & $py $entry -k @tail }
+            elseif ($cmd -in @(':model', ':m'))      { & $py $entry -m @tail }
             elseif ($cmd -in @(':help', ':?', ':h')) { Write-Host $AI_HELP }
-            else                                     { & python $entry $line }
+            else                                     { & $py $entry $line }
         }
         Write-Host '已退出 shell-tool 交互模式' -ForegroundColor DarkGray
     }
@@ -296,10 +401,11 @@ def _read_text_smart(path):
     return raw.decode("utf-8", errors="replace")
 
 
-def write_powershell_profile(repo, home):
+def write_powershell_profile(repo, home, python_path):
     """在 PowerShell profile 中写入/刷新受管理的 ai 函数块（幂等）。"""
     block = (_PS_AI_TEMPLATE.replace("__HOME__", _ps_quote(home))
-             .replace("__REPO__", _ps_quote(repo)))
+             .replace("__REPO__", _ps_quote(repo))
+             .replace("__PYTHON__", _ps_quote(python_path)))
     written = []
     for path in powershell_profile_paths():
         parent = os.path.dirname(path)
@@ -436,6 +542,9 @@ def main():
     parser.add_argument("--bin", default=DEFAULT_BIN,
                         help=f"启动器目录，默认 {DEFAULT_BIN}")
     parser.add_argument("--no-path", action="store_true", help="不修改 PATH")
+    parser.add_argument("--venv", default=os.environ.get("SHELL_TOOL_VENV") or DEFAULT_VENV,
+                        help=f"虚拟环境目录，默认 {DEFAULT_VENV}")
+    parser.add_argument("--no-venv", action="store_true", help="不建虚拟环境，直接用系统 python3")
     parser.add_argument("--no-ps-profile", action="store_true", help="不写入 PowerShell ai 函数")
     parser.add_argument("--ps-profile", help="自定义 PowerShell profile 路径（; 分隔多个）")
     args = parser.parse_args()
@@ -445,27 +554,31 @@ def main():
 
     home = os.path.abspath(os.path.expanduser(args.home))
     bin_dir = os.path.abspath(os.path.expanduser(args.bin))
+    venv_dir = os.path.abspath(os.path.expanduser(args.venv))
 
     say("shell-tool 部署")
-    say("[1/5] 创建配置目录与配置文件")
+    say("[1/6] 检查 Python 环境")
+    python_path = ensure_python_env(venv_dir, use_venv=not args.no_venv)
+    say(f"  = ai 将使用 {python_path}")
+    say("[2/6] 创建配置目录与配置文件")
     setup_home(home)
-    say("[2/5] 生成 ai 启动器")
-    launcher = write_launcher(bin_dir)
-    say("[3/5] 配置 PowerShell ai 函数")
+    say("[3/6] 生成 ai 启动器")
+    launcher = write_launcher(bin_dir, python_path)
+    say("[4/6] 配置 PowerShell ai 函数")
     if not IS_WINDOWS:
         say("  - 非 Windows，跳过")
     elif args.no_ps_profile:
         say("  - 已用 --no-ps-profile 跳过")
     else:
-        write_powershell_profile(REPO, home)
-    say("[4/5] 配置 PATH")
+        write_powershell_profile(REPO, home, python_path)
+    say("[5/6] 配置 PATH")
     if args.no_path:
         say(f"  - 跳过；请自行确保 {bin_dir} 在 PATH 中")
     elif IS_WINDOWS:
         add_path_windows(bin_dir)
     else:
         add_path_unix(bin_dir)
-    say("[5/5] 检查执行权限")
+    say("[6/6] 检查执行权限")
     make_executable()
 
     env_path = os.path.join(home, ".env")
@@ -476,14 +589,14 @@ def main():
     say(f"    data/   {os.path.join(home, 'data')}")
     say(f"    skill/  {os.path.join(home, 'skill')}")
     say(f"  启动器    {launcher}")
+    say(f"  Python    {python_path}")
     if IS_WINDOWS and not args.no_ps_profile:
         say(f"  PowerShell profile  {'; '.join(powershell_profile_paths())}")
     say("")
     say("下一步：")
     say(f"  1. 编辑 {env_path}，至少填 DEEPSEEK_API_KEY")
-    say("  2. 安装依赖： python -m pip install -r requirements.txt")
-    say("  3. 新开一个终端，运行： ai \"你好\"（ai -h 查看全部选项）")
-    say("  可用 SHELL_TOOL_HOME / SHELL_TOOL_REPO / SHELL_TOOL_PYTHON / "
+    say("  2. 新开一个终端，运行： ai \"你好\"（ai -h 查看全部选项）")
+    say("  可用 SHELL_TOOL_HOME / SHELL_TOOL_REPO / SHELL_TOOL_PYTHON / SHELL_TOOL_VENV / "
         "SHELL_TOOL_PS_PROFILE 覆盖默认路径。")
 
 

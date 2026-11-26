@@ -99,18 +99,16 @@ python deploy.py
 
 `deploy.py` 可重复运行（只补缺失、不覆盖已有配置），一次做完：
 
-1. 在 `~/.local/bin` 生成 `ai` 启动器（Windows 为 `ai.cmd`），并把该目录加入 PATH（`--no-path` 跳过）；
-2. Windows 下在 PowerShell 7 / Windows PowerShell 5.1 的 profile 中写入或刷新受管理的 `ai` 函数
+1. 检查 Python 环境：优先用系统 `python3` 在 `~/.venv` 创建虚拟环境，并按 `requirements.txt`
+   安装依赖；已有且依赖齐全就复用（`--no-venv` 跳过建环境，`--venv <目录>` 自定义位置）；
+2. 在 `~/.local/bin` 生成 `ai` 启动器（Windows 为 `ai.cmd`），固定使用上面的 Python，并把该目录加入 PATH（`--no-path` 跳过）；
+3. Windows 下在 PowerShell 7 / Windows PowerShell 5.1 的 profile 中写入或刷新受管理的 `ai` 函数
    （`--no-ps-profile` 跳过；`--ps-profile` 自定义路径；重复部署不会重复追加）；
-3. 给 `dp.py` 加执行权限（POSIX）；
-4. 用 `.env.example` 在 `~/.config/shell-tool/.env` 创建配置（仓库里已有 `.env` 时沿用其内容，避免丢 Key）；
-5. 把 `data/`（SQLite、skill 注册表）与 `skill/` 放到 `~/.config/shell-tool/`，并迁移仓库里已有的数据与技能。
+4. 给 `dp.py` 加执行权限（POSIX）；
+5. 用 `.env.example` 在 `~/.config/shell-tool/.env` 创建配置（仓库里已有 `.env` 时沿用其内容，避免丢 Key）；
+6. 把 `data/`（SQLite、skill 注册表）与 `skill/` 放到 `~/.config/shell-tool/`，并迁移仓库里已有的数据与技能。
 
-```bash
-python -m pip install -r requirements.txt   # requests, pymysql, flask, python-dotenv, rich
-```
-
-装完依赖后，新开终端即可：
+新开终端即可：
 
 ```bash
 ai "你好"          # 等价于 python dp.py "你好"
@@ -127,9 +125,11 @@ Windows 下 `deploy.py` 会自动在 PowerShell profile 中维护 `ai` 函数：
 若你自己维护 profile，可设置 `SHELL_TOOL_PS_PROFILE` 指向要写入的文件（分号分隔多个）。
 
 配置目录优先级：`SHELL_TOOL_HOME` 环境变量 > `~/.config/shell-tool`（存在 `.env` 时）> 仓库目录。
-启动器另可用 `SHELL_TOOL_REPO`（仓库位置）、`SHELL_TOOL_PYTHON`（解释器，默认优先 `$HOME/.venv/bin/python3`）覆盖。
+可用环境变量覆盖：`SHELL_TOOL_REPO`（仓库位置）、`SHELL_TOOL_PYTHON`（强制指定解释器，优先于虚拟环境）、
+`SHELL_TOOL_VENV`（虚拟环境目录）、`SHELL_TOOL_PS_PROFILE`（PowerShell profile 路径）。
 
-运行要求：**Python 3.8+**，无需 openai SDK（接入层是原生 `requests`）。
+运行要求：**Python 3.8+**，无需 openai SDK（接入层是原生 `requests`）。部署时自动建虚拟环境的
+系统解释器优先取 `python3`；若机器没有 `python3`，回退 `python` / `py -3` / 当前解释器。
 
 ### 手动安装（不部署）
 
