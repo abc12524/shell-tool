@@ -453,11 +453,7 @@ async def run_async(options: Options, *, api_mode=None, stream=None) -> int:
     """run() 的异步版本：已在事件循环里（如 async 服务）时 await 这个。"""
     if stream is not None and api_mode is None:
         api_mode = True
-    if api_mode is None and stream is None:
-        try:
-            return await _run(options)
-        except ExitCode as e:
-            return e.code
+    # 传 None 时就是「沿用环境变量与当前 stdout」，无需另开分支
     with console_mod.output_mode(api_mode=api_mode, stream=stream):
         try:
             return await _run(options)

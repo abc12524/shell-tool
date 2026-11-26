@@ -2,6 +2,7 @@
 """全局 Rich Console 实例，供各模块统一使用"""
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -33,9 +34,15 @@ from rich.theme import Theme
 # 也让 core.main 能被当作库调用（长驻进程不必靠新开进程换模式）。
 _API_MODE_ENV = "DP_API_MODE"
 
-# 显式配置（None = 未配置，回落到环境变量 / 进程原始 stdout）
-_mode_override = None
-_stream_override = None
+# 显式配置放在 contextvar 里，而不是模块全局变量：
+# 同一进程内若有两个调用重叠（服务里两个标签页、脚本并发、将来 api.py 改进程内），
+# 各自持有自己的模式与目标流，不会把 A 的正文写进 B 的响应。默认 (None, None)
+# = 未配置，回落环境变量与当前 stdout。
+# 注意：run_in_executor 起的线程不继承 context；当前 events 的工具事件都在协程里发，
+# 不受影响；若将来在工具线程里发事件，需用 contextvars.copy_context().run(...)。
+_OVERRIDE: contextvars.ContextVar = contextvars.ContextVar(
+    "shell_tool_output_override", default=(None, None))
+
 # 进程真正的 stdout：在可能的 API 模式 stdout 替换之前捕获
 _ORIGINAL_STDOUT = sys.stdout
 
@@ -43,43 +50,43 @@ _ORIGINAL_STDOUT = sys.stdout
 _EMIT_LOCK = threading.Lock()
 
 
+def _resolve():
+    """一次读出（是否 API 模式, 事件目标流）——两者同源，不会取到撕裂组合。"""
+    mode, stream = _OVERRIDE.get()
+    if mode is None:
+        mode = os.environ.get(_API_MODE_ENV) == "1"
+    if stream is not None:
+        return mode, stream
+    # spawn 子进程时 sys.stdout 已被换成 _DiagStream；事件必须写回真正的 stdout，
+    # 否则 emit → _DiagStream.write → emit 无限递归。
+    # 其余情况（终端、redirect_stdout、pytest capsys）跟随当前 sys.stdout，
+    # 让重定向/捕获能收到事件。
+    if isinstance(sys.stdout, _DiagStream):
+        return mode, _ORIGINAL_STDOUT
+    return mode, sys.stdout
+
+
 def api_mode() -> bool:
     """当前是否 API 模式（显式配置优先，否则读环境变量）"""
-    if _mode_override is not None:
-        return _mode_override
-    return os.environ.get(_API_MODE_ENV) == "1"
+    return _resolve()[0]
 
 
 def content_stream():
     """结构化事件的写入目标（仅 API 模式下被 emit 使用）"""
-    return _stream_override if _stream_override is not None else _ORIGINAL_STDOUT
-
-
-def configure(*, api_mode=None, stream=None):
-    """进程级切换输出模式（常驻服务可在启动时调一次，之后一直生效）。
-
-    api_mode=None  → 恢复「跟随环境变量」
-    stream=None    → 事件写回进程原始 stdout
-    """
-    global _mode_override, _stream_override
-    with _EMIT_LOCK:
-        _mode_override = None if api_mode is None else bool(api_mode)
-        _stream_override = stream
+    return _resolve()[1]
 
 
 @contextmanager
 def output_mode(*, api_mode=None, stream=None):
-    """临时切换输出模式，退出时恢复调用前的设置（供单次库调用用，嵌套安全）。"""
-    global _mode_override, _stream_override
-    with _EMIT_LOCK:
-        prev = (_mode_override, _stream_override)
-        _mode_override = None if api_mode is None else bool(api_mode)
-        _stream_override = stream
+    """临时切换输出模式，退出时恢复调用前的设置（供单次库调用用，嵌套安全）。
+
+    作用域只覆盖当前线程 / 当前 asyncio 上下文，不影响其他并发调用。
+    """
+    token = _OVERRIDE.set((None if api_mode is None else bool(api_mode), stream))
     try:
         yield
     finally:
-        with _EMIT_LOCK:
-            _mode_override, _stream_override = prev
+        _OVERRIDE.reset(token)
 
 
 def _force_utf8(stream):
@@ -103,7 +110,7 @@ def _force_utf8(stream):
 
 
 # 工具在子线程执行时也可能打印，需保证一行事件原子写入，避免 JSON 被截断
-# （_EMIT_LOCK 定义在文件前部：configure() / emit() / _output() 共用同一把锁）
+# （_EMIT_LOCK 定义在文件前部：emit() / _output() 共用同一把锁）
 
 
 def emit(kind: str, **fields):
@@ -111,13 +118,13 @@ def emit(kind: str, **fields):
 
     事件只携带“变化的数据”，展示格式（emoji/颜色/表格）由客户端自行构建。
     """
-    if not api_mode():
+    mode, stream = _resolve()
+    if not mode:
         return
     payload = {"t": kind}
     payload.update(fields)
     try:
         line = json.dumps(payload, ensure_ascii=False)
-        stream = content_stream()
         with _EMIT_LOCK:
             stream.write(line + "\n")
             stream.flush()
@@ -127,10 +134,10 @@ def emit(kind: str, **fields):
 
 def _output(kind: str, text: str):
     """正文/思考增量：API 模式发事件，否则原样写文本（重定向场景）"""
-    if api_mode():
+    mode, stream = _resolve()
+    if mode:
         emit(kind, content=text)
     elif text:
-        stream = content_stream()
         with _EMIT_LOCK:
             stream.write(text)
             stream.flush()
@@ -163,14 +170,14 @@ _force_utf8(sys.stderr)
 
 # 环境变量已开启 API 模式时（spawn 子进程的老路径），把 sys.stdout 换成兜底诊断通道：
 # 未结构化输出 -> log 事件；正文与事件走 _ORIGINAL_STDOUT。
-# 进程内调用（configure(api_mode=True)）不替换 sys.stdout——那是服务的控制台，
+# 进程内的 output_mode(api_mode=True) 不替换 sys.stdout——那是服务的控制台，
 # 不该被接管；诊断输出留在服务日志里反而是对的。
 if api_mode():
     sys.stdout = _DiagStream()
 
 
 def __getattr__(name):
-    """兼容旧引用：`from .console import _API_MODE` 仍可用，但取到的是调用时的值。"""
+    """兼容旧的外部引用（仓库内已无调用）：取到的是实时值，不是 import 快照。"""
     if name == "_API_MODE":
         return api_mode()
     if name == "_CONTENT_STREAM":
