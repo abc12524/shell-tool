@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
-"""CLI 主流程：参数解析、session 管理、记忆注入、对话执行"""
+"""CLI 主流程：参数解析、session 管理、记忆注入、对话执行
+
+对外提供两个入口：
+  run(options) / run_async(options)  → 库入口，返回退出码，不终止进程
+  main(argv=None)                    → CLI 入口，返回退出码（dp.py 负责 sys.exit）
+"""
+from __future__ import annotations
+
 import asyncio
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import config
+from . import console as console_mod
 from . import db
 from . import llm
 from . import billing
 from . import events
 from rich.text import Text
 
-from .console import console, render_table, say, _API_MODE
+from .console import console, render_table, say, api_mode
 from .tools import get_system_info
 from .tools.skill_tool import disclosed_skills, set_status, skills_overview
 from .tools.skill_hub import (remote_skills, search_skills,
@@ -45,95 +54,122 @@ USAGE = """使用方法：ai [选项] [问题]（等价于 python dp.py [选项]
 """
 
 
-def parse_args(argv):
-    """解析命令行参数，返回
-    (new_flag, session_id, list_sessions, question, api_key, model,
-     skill_status, show_skills, hub_action, show_help)
-    hub_action: None | ('list', None) | ('install', [名称...]) | ('delete', [名称...])"""
-    new_flag = False
-    sid = None
-    list_sessions = False
-    api_key = None
-    model = None
-    skill_status = None
-    show_skills = False
-    show_help = False
-    hub_action = None
-    question_parts = []
-    i = 1
-    while i < len(argv):
-        a = argv[i]
-        if a in ('-h', '--help'):
-            show_help = True
-            i += 1
-        elif a in ('-n', '--new'):
-            new_flag = True
-            i += 1
-        elif a in ('-S', '--skill'):
-            if (i + 2 < len(argv) and not argv[i + 1].startswith('-')
-                    and not argv[i + 2].startswith('-')):
-                skill_status = (argv[i + 1], argv[i + 2])
-                i += 3
-            elif i + 1 >= len(argv) or argv[i + 1].startswith('-'):
-                # 不带参数 → 列出全部 skill 及 status
-                show_skills = True
+class ExitCode(Exception):
+    """提前结束并指定退出码。
+
+    辅助函数（参数解析、会话解析、远程索引拉取）在遇到致命错误时不再 sys.exit，
+    改为抛这个异常，由 run()/main() 统一转成返回值——库调用方不会被直接终止。
+    """
+
+    def __init__(self, code=0):
+        super().__init__(code)
+        self.code = int(code)
+
+
+@dataclass
+class Options:
+    """一次调用的全部输入。
+
+    CLI 走 Options.from_args()；库调用方可直接构造，例如：
+        run(Options(question="你好"))                 # 复用最近会话
+        run(Options(question="你好", new=True))       # 新开会话
+        run(Options(list_sessions=True))              # 列会话
+    字段名与历史流程里的局部变量一一对应，便于对照。
+    """
+
+    question: str = ""
+    new: bool = False
+    session: str | None = None
+    list_sessions: bool = False
+    show_skills: bool = False
+    show_help: bool = False
+    skill_status: tuple[str, str] | None = None
+    hub_action: tuple[str, list[str] | None] | None = None
+    api_key: str | None = None
+    model: str | None = None
+
+    @classmethod
+    def from_args(cls, args: list[str]) -> "Options":
+        """解析参数列表（不含程序名），如 ["-n", "你好"]。
+
+        hub_action: None | ('list', None) | ('install', [名称...]) | ('delete', [名称...])
+        """
+        opts = cls()
+        question_parts = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ('-h', '--help'):
+                opts.show_help = True
                 i += 1
-            else:
-                say("-S/--skill 需要 <名称> <enable|disable>，例如：-S my_skill disable"
-                    "（不带参数则列出全部 skill）", "warn")
-                sys.exit(1)
-        elif a in ('-I', '--install'):
-            names = []
-            j = i + 1
-            while j < len(argv) and not argv[j].startswith('-'):
-                names.append(argv[j])
-                j += 1
-            if names:
-                hub_action = ('install', names)
-                i = j
-            else:
-                # 不带参数 → 列出远程可装 skill
-                hub_action = ('list', None)
+            elif a in ('-n', '--new'):
+                opts.new = True
                 i += 1
-        elif a in ('-D', '--delete'):
-            names = []
-            j = i + 1
-            while j < len(argv) and not argv[j].startswith('-'):
-                names.append(argv[j])
-                j += 1
-            if names:
-                hub_action = ('delete', names)
-                i = j
+            elif a in ('-S', '--skill'):
+                if (i + 2 < len(args) and not args[i + 1].startswith('-')
+                        and not args[i + 2].startswith('-')):
+                    opts.skill_status = (args[i + 1], args[i + 2])
+                    i += 3
+                elif i + 1 >= len(args) or args[i + 1].startswith('-'):
+                    # 不带参数 → 列出全部 skill 及 status
+                    opts.show_skills = True
+                    i += 1
+                else:
+                    say("-S/--skill 需要 <名称> <enable|disable>，例如：-S my_skill disable"
+                        "（不带参数则列出全部 skill）", "warn")
+                    raise ExitCode(1)
+            elif a in ('-I', '--install'):
+                names = []
+                j = i + 1
+                while j < len(args) and not args[j].startswith('-'):
+                    names.append(args[j])
+                    j += 1
+                if names:
+                    opts.hub_action = ('install', names)
+                    i = j
+                else:
+                    # 不带参数 → 列出远程可装 skill
+                    opts.hub_action = ('list', None)
+                    i += 1
+            elif a in ('-D', '--delete'):
+                names = []
+                j = i + 1
+                while j < len(args) and not args[j].startswith('-'):
+                    names.append(args[j])
+                    j += 1
+                if names:
+                    opts.hub_action = ('delete', names)
+                    i = j
+                else:
+                    say("-D/--delete 需要指定 skill 名称（可用 -S 查看已装 skill）", "warn")
+                    raise ExitCode(1)
+            elif a in ('-s', '--session'):
+                if i + 1 < len(args) and not args[i + 1].startswith('-'):
+                    opts.session = args[i + 1]
+                    i += 2
+                else:
+                    # 不带参数 → 列出最近会话
+                    opts.list_sessions = True
+                    i += 1
+            elif a in ('-k', '--key'):
+                if i + 1 < len(args) and args[i + 1].strip():
+                    opts.api_key = args[i + 1]
+                    i += 2
+                else:
+                    say("-k/--key 需要指定 API Key", "warn")
+                    raise ExitCode(1)
+            elif a in ('-m', '--model'):
+                if i + 1 < len(args) and args[i + 1].strip():
+                    opts.model = args[i + 1]
+                    i += 2
+                else:
+                    say("-m/--model 需要指定模型名", "warn")
+                    raise ExitCode(1)
             else:
-                say("-D/--delete 需要指定 skill 名称（可用 -S 查看已装 skill）", "warn")
-                sys.exit(1)
-        elif a in ('-s', '--session'):
-            if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
-                sid = argv[i + 1]
-                i += 2
-            else:
-                # 不带参数 → 列出最近会话
-                list_sessions = True
+                question_parts.append(a)
                 i += 1
-        elif a in ('-k', '--key'):
-            if i + 1 < len(argv) and argv[i + 1].strip():
-                api_key = argv[i + 1]
-                i += 2
-            else:
-                say("-k/--key 需要指定 API Key", "warn")
-                sys.exit(1)
-        elif a in ('-m', '--model'):
-            if i + 1 < len(argv) and argv[i + 1].strip():
-                model = argv[i + 1]
-                i += 2
-            else:
-                say("-m/--model 需要指定模型名", "warn")
-                sys.exit(1)
-        else:
-            question_parts.append(a)
-            i += 1
-    return (new_flag, sid, list_sessions, ' '.join(question_parts),
-            api_key, model, skill_status, show_skills, hub_action, show_help)
+        opts.question = ' '.join(question_parts)
+        return opts
 
 
 def _state_text(state, desc):
@@ -173,7 +209,7 @@ def print_remote_skills(skills=None, caption=None):
             skills = remote_skills()
         except RuntimeError as e:
             say(f"{e}", "warn")
-            sys.exit(1)
+            raise ExitCode(1)
     if not skills:
         console.print("远程仓库暂无技能", style="muted")
         return
@@ -214,7 +250,7 @@ def resolve_session(new_flag, sid, force_new=False):
     if sid:
         if not db.session_exists(sid):
             say(f"会话 {sid} 不存在", "warn")
-            sys.exit(1)
+            raise ExitCode(1)
         return sid, False
 
     if new_flag or force_new:
@@ -400,39 +436,72 @@ def print_usage_stats(usage, model=None, when=None):
     events.ev_usage(billing.model_family(model), peak, hit, miss, out, costs, total, balance, currency)
 
 
-def main():
-    """CLI 入口（async 包装，供 asyncio.run 调用）"""
-    asyncio.run(_async_main())
+def run(options: Options, *, api_mode=None, stream=None) -> int:
+    """库入口（同步）：执行一次完整调用，返回退出码，不终止进程。
+
+    api_mode=True  → 输出「一行一个 JSON 事件」，写入 stream（默认进程原始 stdout）
+    只给 stream    → 视为想收事件流，api_mode 自动置 True
+    两者都传 None  → 沿用环境变量 DP_API_MODE 与进程 stdout（CLI 老路径，行为不变）
+
+    输出模式只在本调用期间生效，返回前恢复原设置，不影响后续 CLI/其他调用。
+    注意：内部用 asyncio.run()，不能在已有事件循环里直接调用；那种场景用 run_async()。
+    """
+    return asyncio.run(run_async(options, api_mode=api_mode, stream=stream))
 
 
-async def _async_main():
-    (new_flag, sid, list_sessions, question, api_key, model,
-     skill_status, show_skills, hub_action, show_help) = parse_args(sys.argv)
+async def run_async(options: Options, *, api_mode=None, stream=None) -> int:
+    """run() 的异步版本：已在事件循环里（如 async 服务）时 await 这个。"""
+    if stream is not None and api_mode is None:
+        api_mode = True
+    if api_mode is None and stream is None:
+        try:
+            return await _run(options)
+        except ExitCode as e:
+            return e.code
+    with console_mod.output_mode(api_mode=api_mode, stream=stream):
+        try:
+            return await _run(options)
+        except ExitCode as e:
+            return e.code
+
+
+def main(argv=None) -> int:
+    """CLI 入口：返回退出码（dp.py 负责 sys.exit(main())）。"""
+    args = sys.argv[1:] if argv is None else list(argv)
+    try:
+        options = Options.from_args(args)
+    except ExitCode as e:
+        return e.code
+    return run(options)
+
+
+async def _run(opts: Options) -> int:
+    """一次调用的实际流程；返回值即进程退出码。"""
     asked_at = datetime.now(timezone.utc)
 
     # -h/--help：显示帮助后退出（不建会话、不调用模型）
-    if show_help:
+    if opts.show_help:
         print(USAGE)
-        sys.exit(0)
+        return 0
 
     # -S/--skill 无参数：列出全部 skill 及 status 后退出
-    if show_skills:
+    if opts.show_skills:
         print_skills()
-        sys.exit(0)
+        return 0
 
     # -S/--skill：开关某 skill 的 status 后直接退出（不建会话、不调用模型）
-    if skill_status:
-        name, value = skill_status
+    if opts.skill_status:
+        name, value = opts.skill_status
         good, message = set_status(name, value)
         say(message, "ok" if good else "warn")
-        sys.exit(0 if good else 1)
+        return 0 if good else 1
 
     # -I/--install：列远程 / 下载安装 skill 后退出（不建会话、不调用模型）
-    if hub_action:
-        action, name = hub_action
+    if opts.hub_action:
+        action, name = opts.hub_action
         if action == 'list':
             print_remote_skills()
-            sys.exit(0)
+            return 0
         if action == 'delete':
             failed = 0
             for skill_name in name:
@@ -443,14 +512,14 @@ async def _async_main():
                     failed += 1
                     continue
                 say(f"已删除 skill '{res['name']}'", "ok")
-            sys.exit(0 if not failed else 1)
+            return 0 if not failed else 1
         failed = 0
         # 先按远程索引解析名称：完全匹配 → 安装；不完整 → 按前缀搜索并列候选
         try:
             index = remote_skills()
         except RuntimeError as e:
             say(f"{e}", "warn")
-            sys.exit(1)
+            return 1
         by_name = {s["name"]: s["name"] for s in index}
         by_lower = {s["name"].lower(): s["name"] for s in index}
         targets, searched, missing = [], [], []
@@ -480,14 +549,14 @@ async def _async_main():
             extra = "，已生成 config.json（请填配置）" if res.get("config_created") else ""
             deps = "，依赖：" + ", ".join(res["requires"]) if res.get("requires") else ""
             say(f"已安装 skill '{res['name']}'（{len(res['files'])} 个文件{extra}{deps}）", "ok")
-        sys.exit(0 if not failed else 1)
+        return 0 if not failed else 1
 
     # -k/-m：覆盖并写回 .env，本次进程与后续进程（含 8000 端口调用）均生效
     updates = {}
-    if api_key:
-        updates['DEEPSEEK_API_KEY'] = api_key
-    if model:
-        updates['DEEPSEEK_MODEL'] = model
+    if opts.api_key:
+        updates['DEEPSEEK_API_KEY'] = opts.api_key
+    if opts.model:
+        updates['DEEPSEEK_MODEL'] = opts.model
     if updates:
         config.update_env(**updates)
         events.ev_config(list(updates))
@@ -496,29 +565,29 @@ async def _async_main():
         db.resolve_backend()
     except Exception as e:
         say(f"数据库初始化失败：{e}", "err")
-        sys.exit(1)
+        return 1
 
     # -s 无参数：只列出最近会话后退出
-    if list_sessions:
+    if opts.list_sessions:
         print_recent_sessions()
-        sys.exit(0)
+        return 0
 
-    if not question:
+    if not opts.question:
         # -n 不带 question：只结算旧会话并开新会话，不进入对话流程。
         # 供外部通道（如 qqbot 的 /new）即时开新会话——建好后不带 -n/-s 的
         # 下一次调用会默认复用它（get_active_session_id 取最新 active）。
-        if new_flag:
-            session_id, is_new = resolve_session(new_flag, sid)
+        if opts.new:
+            session_id, is_new = resolve_session(opts.new, opts.session)
             events.ev_session("new" if is_new else "resume", session_id)
-            if not _API_MODE:
+            if not api_mode():
                 say(f"已开启新会话：{session_id}", "ok")
-            sys.exit(0)
+            return 0
         print(USAGE)
-        sys.exit(0)
+        return 0
 
     if not config.DEEPSEEK_API_KEY:
         say("缺少 DEEPSEEK_API_KEY，请在 .env 中配置", "err")
-        sys.exit(1)
+        return 1
 
     events.ev_db(db.online_enabled())
 
@@ -526,12 +595,12 @@ async def _async_main():
     # 存在时强制新开会话（无论用户有没有加 -n），并把 <history> 注入首轮上下文；
     # 若用户显式 -s 指定会话，则尊重其选择，本轮不注入、文档留待下次生效。
     handoff = db.pending_handoff()
-    if handoff and sid:
-        if not _API_MODE:
+    if handoff and opts.session:
+        if not api_mode():
             say("检测到待生效的交接文档；本轮已用 -s 指定会话，未注入（不加 -s 的下一次对话生效）", "hint")
         handoff = None
 
-    session_id, is_new = resolve_session(new_flag, sid, force_new=bool(handoff))
+    session_id, is_new = resolve_session(opts.new, opts.session, force_new=bool(handoff))
     events.ev_session("new" if is_new else "resume", session_id)
     if handoff:
         events.ev_handoff(len(handoff['content']))
@@ -547,7 +616,7 @@ async def _async_main():
 
     # 当前问题入库（作为历史的一部分）后，收集本轮所有注入块，最后合并成一条消息。
     turn_no = db.count_user_turns(session_id) + 1
-    db.append_messages(session_id, [{"role": "user", "content": question}])
+    db.append_messages(session_id, [{"role": "user", "content": opts.question}])
 
     blocks = []
     # 交接文档放在最前：它是上一段工作的压缩上下文，先于 skill 名单等辅助信息
@@ -557,7 +626,7 @@ async def _async_main():
 
     # 抓取：把用户问题写入 OV session（config.OV_CAPTURE）
     if config.OV_CAPTURE:
-        openviking_capture(ov_session_id, [{"role": "user", "content": question}])
+        openviking_capture(ov_session_id, [{"role": "user", "content": opts.question}])
 
     # profile：会话开始注入可用记忆索引（config.OV_PROFILE，仅新建会话）
     if config.OV_PROFILE and is_new:
@@ -568,7 +637,8 @@ async def _async_main():
 
     # question 召回：每轮以用户问题为 query 检索相关记忆（config.OV_INJECT 含 question/both）
     if config.OV_INJECT in ('question', 'both'):
-        mem_context = openviking_load_context([{"role": "user", "content": question}], session_id=session_id)
+        mem_context = openviking_load_context([{"role": "user", "content": opts.question}],
+                                             session_id=session_id)
         events.ev_memory("recall", bool(mem_context))
         if mem_context:
             blocks.append(openviking_block(mem_context))
@@ -585,7 +655,7 @@ async def _async_main():
     stored = db.load_messages(session_id)
     messages = [{"role": "system", "content": system_prompt}] + stored
 
-    events.ev_question(question)
+    events.ev_question(opts.question)
     try:
         full_content, full_reasoning, final_usage, assistant_msg, tool_results, new_history_msgs = \
             await llm.chat_completion_with_tools(messages, session_id=session_id, ov_session_id=ov_session_id)
@@ -597,13 +667,14 @@ async def _async_main():
         say(f"调用失败：{e}", "err")
         say("若为服务繁忙（503/429），稍等片刻重试即可；也可在 .env 中切换 "
             "DEEPSEEK_BASE_URL / DEEPSEEK_MODEL 使用备用服务商。", "hint")
-        sys.exit(1)
+        return 1
 
     events.ev_session("saved", session_id)
     if config.OV_CAPTURE and ov_session_id:
         openviking_commit_session(ov_session_id)
     print_usage_stats(final_usage, model=config.DEEPSEEK_MODEL, when=asked_at)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
