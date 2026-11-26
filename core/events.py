@@ -22,7 +22,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
-from .console import console, emit, render_grid, _API_MODE
+from .console import console, emit, render_grid, api_mode
 
 # 终端显示阈值（折叠 = 超出部分不显示，末尾用一行说明还有多少行）：
 #   调用参数：缩进后 ≤5 行压成一行；5~15 行展开；>15 行折叠。
@@ -448,7 +448,7 @@ def _diff_parts(result, max_lines=_RESULT_DIFF_MAX_LINES):
 
 def _ev(kind, payload, terminal=None):
     """统一出口：API 模式发事件；终端模式调用 terminal() 渲染"""
-    if _API_MODE:
+    if api_mode():
         emit(kind, **payload)
     elif terminal is not None:
         terminal()
@@ -492,7 +492,7 @@ def ev_reasoning_header():
 
 def ev_tool_round(index, local, search):
     # 上一轮若有调用没等到结果（被中断），先兜底打出来，进入新一轮
-    if not _API_MODE:
+    if not api_mode():
         flush_pending_calls()
     _ev("tool_round", {"index": index, "local": local, "search": search}, None)
 

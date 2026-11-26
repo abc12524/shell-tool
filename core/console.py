@@ -8,6 +8,7 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 
 from rich.console import Console
 from rich.live import Live
@@ -17,16 +18,68 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-# API 模式：由 server/api.py 注入 DP_API_MODE=1。此时 stdout 不再直接输出终端
-# 文本，而是输出「一行一个 JSON 事件」的结构化流：
-#   {"t":"content",  "d":"..."}  模型正文增量
-#   {"t":"reasoning","d":"..."}  思考过程增量
-#   {"t":"note",     "d":"..."}  诊断信息（状态行/工具调用/token 统计等）
+# API 模式：stdout 不再直接输出终端文本，而是输出「一行一个 JSON 事件」的结构化流：
+#   {"t":"content",  "content":"..."}  模型正文增量
+#   {"t":"reasoning","content":"..."}  思考过程增量
+#   {"t":"log",      "text":"..."}     诊断信息（状态行/工具调用/token 统计等）
+#   {"t":"session"|"question"|"tool_call"|..., ...}  语义事件，见 core/events.py
 # server/api.py 把每种事件映射成对应 SSE 事件，客户端按类型分别渲染，
 # 从而既有干净的 Markdown 正文，又保留工具调用、用量、思考过程等信息。
-_API_MODE = os.environ.get("DP_API_MODE") == "1"
-# 保存真正的 stdout 作为结构化事件通道
-_CONTENT_STREAM = sys.stdout
+#
+# 模式来源有两处，按优先级：
+#   1. 显式配置：进程内调用 core.main.run(..., api_mode=True, stream=buf)
+#   2. 环境变量 DP_API_MODE=1：server/api.py spawn 子进程时注入（旧行为）
+# 二者都在「调用时」求值，不再在 import 时固化成常量——同一进程里可切换模式，
+# 也让 core.main 能被当作库调用（长驻进程不必靠新开进程换模式）。
+_API_MODE_ENV = "DP_API_MODE"
+
+# 显式配置（None = 未配置，回落到环境变量 / 进程原始 stdout）
+_mode_override = None
+_stream_override = None
+# 进程真正的 stdout：在可能的 API 模式 stdout 替换之前捕获
+_ORIGINAL_STDOUT = sys.stdout
+
+# 工具在子线程执行时也可能打印，需保证一行事件原子写入，避免 JSON 被截断
+_EMIT_LOCK = threading.Lock()
+
+
+def api_mode() -> bool:
+    """当前是否 API 模式（显式配置优先，否则读环境变量）"""
+    if _mode_override is not None:
+        return _mode_override
+    return os.environ.get(_API_MODE_ENV) == "1"
+
+
+def content_stream():
+    """结构化事件的写入目标（仅 API 模式下被 emit 使用）"""
+    return _stream_override if _stream_override is not None else _ORIGINAL_STDOUT
+
+
+def configure(*, api_mode=None, stream=None):
+    """进程级切换输出模式（常驻服务可在启动时调一次，之后一直生效）。
+
+    api_mode=None  → 恢复「跟随环境变量」
+    stream=None    → 事件写回进程原始 stdout
+    """
+    global _mode_override, _stream_override
+    with _EMIT_LOCK:
+        _mode_override = None if api_mode is None else bool(api_mode)
+        _stream_override = stream
+
+
+@contextmanager
+def output_mode(*, api_mode=None, stream=None):
+    """临时切换输出模式，退出时恢复调用前的设置（供单次库调用用，嵌套安全）。"""
+    global _mode_override, _stream_override
+    with _EMIT_LOCK:
+        prev = (_mode_override, _stream_override)
+        _mode_override = None if api_mode is None else bool(api_mode)
+        _stream_override = stream
+    try:
+        yield
+    finally:
+        with _EMIT_LOCK:
+            _mode_override, _stream_override = prev
 
 
 def _force_utf8(stream):
@@ -50,7 +103,7 @@ def _force_utf8(stream):
 
 
 # 工具在子线程执行时也可能打印，需保证一行事件原子写入，避免 JSON 被截断
-_EMIT_LOCK = threading.Lock()
+# （_EMIT_LOCK 定义在文件前部：configure() / emit() / _output() 共用同一把锁）
 
 
 def emit(kind: str, **fields):
@@ -58,27 +111,29 @@ def emit(kind: str, **fields):
 
     事件只携带“变化的数据”，展示格式（emoji/颜色/表格）由客户端自行构建。
     """
-    if not _API_MODE:
+    if not api_mode():
         return
     payload = {"t": kind}
     payload.update(fields)
     try:
         line = json.dumps(payload, ensure_ascii=False)
+        stream = content_stream()
         with _EMIT_LOCK:
-            _CONTENT_STREAM.write(line + "\n")
-            _CONTENT_STREAM.flush()
+            stream.write(line + "\n")
+            stream.flush()
     except Exception:
         pass
 
 
 def _output(kind: str, text: str):
     """正文/思考增量：API 模式发事件，否则原样写文本（重定向场景）"""
-    if _API_MODE:
+    if api_mode():
         emit(kind, content=text)
     elif text:
+        stream = content_stream()
         with _EMIT_LOCK:
-            _CONTENT_STREAM.write(text)
-            _CONTENT_STREAM.flush()
+            stream.write(text)
+            stream.flush()
 
 
 class _DiagStream:
@@ -103,12 +158,24 @@ class _DiagStream:
         return False
 
 
-_force_utf8(_CONTENT_STREAM)
+_force_utf8(_ORIGINAL_STDOUT)
 _force_utf8(sys.stderr)
 
-# API 模式下把 sys.stdout 换成兜底诊断通道（未结构化输出 -> log 事件；正文走 _CONTENT_STREAM）
-if _API_MODE:
+# 环境变量已开启 API 模式时（spawn 子进程的老路径），把 sys.stdout 换成兜底诊断通道：
+# 未结构化输出 -> log 事件；正文与事件走 _ORIGINAL_STDOUT。
+# 进程内调用（configure(api_mode=True)）不替换 sys.stdout——那是服务的控制台，
+# 不该被接管；诊断输出留在服务日志里反而是对的。
+if api_mode():
     sys.stdout = _DiagStream()
+
+
+def __getattr__(name):
+    """兼容旧引用：`from .console import _API_MODE` 仍可用，但取到的是调用时的值。"""
+    if name == "_API_MODE":
+        return api_mode()
+    if name == "_CONTENT_STREAM":
+        return content_stream()
+    raise AttributeError(name)
 
 # ── 终端视觉令牌 ────────────────────────────────────────────────────────────
 # 统一在这里定义语义色与组件样式，events.py / main.py 只引用样式名而不写死颜色，
@@ -334,6 +401,9 @@ def say(message: str, level: str = "info"):
 
     原文案里「⚠️ 两个空格」和「✅ 一个空格」混用，一列提示排下来就是错位的；
     统一成「图标 + 一个空格」，并交给主题着色，成功/警告/失败一眼可辨。
+
+    API 模式下发成 log 事件而不是打印：spawn 子进程时这些文本会被 _DiagStream
+    兜底成 log 事件，进程内调用若直接 print 就会落到服务控制台、客户端反而收不到。
     """
     icon, style = {
         "ok": ("✅", "ok"),
@@ -341,6 +411,9 @@ def say(message: str, level: str = "info"):
         "err": ("❌", "err"),
         "info": ("·", "muted"),
     }.get(level, ("·", "muted"))
+    if api_mode():
+        emit("log", text=f"  {icon} {message}")
+        return
     console.print(Text(f"  {icon} {message}", style=style))
 
 
